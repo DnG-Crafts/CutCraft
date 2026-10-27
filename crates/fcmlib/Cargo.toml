@@ -1,0 +1,19 @@
+[package]
+name = "fcmlib"
+version = "0.1.0"
+repository = "https://github.com/justjanne/fcmlib/"
+authors = ["Janne Mareike Koschinski <mail@justjanne.de>"]
+description = "Library to read and write Brother's FCM plotter files"
+license = "MPL-2.0"
+edition = "2021"
+
+# Vendored from https://github.com/justjanne/fcmlib (MPL-2.0, see LICENSE.md);
+# ported from nom 7 to nom 8 for CutCraft. Otherwise unchanged.
+
+[dependencies]
+nom = "8.0.0"
+log = "0.4.20"
+bitflags = "2.4.2"
+
+[lints.rust]
+unsafe_code = "forbid"

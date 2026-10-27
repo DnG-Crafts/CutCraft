@@ -1,0 +1,46 @@
+[package]
+name = "cutcraft"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+anyhow = "1.0.104"
+arboard = "3.6.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+cutcraft-core = { version = "0.1.0", path = "../cutcraft-core" }
+eframe = { version = "0.36.2", features = ["wgpu", "glow"] }
+egui = "0.36.2"
+fontdb = "0.24"
+image = "0.25"
+lyon_tessellation = "1.0.22"
+rfd = "0.17.2"
+uuid = "1"
+
+[dev-dependencies]
+geo = "0.33"
+
+[features]
+default = ["linux-browser"]
+# The built-in browser on Linux: needs the WebKitGTK and GTK 3 development
+# packages (libwebkit2gtk-4.1-dev, libgtk-3-dev) and an X11 session. Build
+# with --no-default-features to leave it out. (No effect on other systems.)
+linux-browser = ["dep:wry", "dep:gtk"]
+
+# The built-in browser: Edge WebView2 on Windows, WKWebView on macOS.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+wry = "0.57.1"
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39.1"
+windows = "0.62.2"
+
+# WebKitGTK on Linux, only with the linux-browser feature.
+[target.'cfg(target_os = "linux")'.dependencies]
+wry = { version = "0.57.1", optional = true }
+gtk = { version = "0.18", optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.24"

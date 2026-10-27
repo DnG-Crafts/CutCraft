@@ -1,0 +1,32 @@
+[package]
+name = "cutcraft-core"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1.0.104"
+btleplug = "0.13.5"
+flate2 = "1.1.10"
+fontdb = "0.24.0"
+futures = "0.3.34"
+geo = "0.33.1"
+image = "0.25.10"
+kurbo = "0.13.1"
+fcmlib = { path = "../fcmlib" }
+lopdf = "0.45.0"
+nusb = "0.1.14"
+qrcodegen = "1.8.0"
+rhai = "1.19.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+spellbook = "0.4.2"
+thiserror = "2.0.21"
+tokio = { version = "1.53.3", features = ["rt", "time", "sync", "macros"] }
+ttf-parser = "0.25.1"
+usvg = "0.48.1"
+ureq = "3.5.0"
+uuid = { version = "1.28.0", features = ["v4", "serde"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Usb", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_Security"] }

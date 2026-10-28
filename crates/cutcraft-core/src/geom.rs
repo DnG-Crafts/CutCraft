@@ -258,6 +258,87 @@ pub enum BoolOp {
 /// what "weld" means; passing everything to [`boolean`] at once would instead
 /// XOR the overlaps into holes.
 pub fn union_each(paths: &[BezPath]) -> BezPath {
+    // each path on its own (its holes), then pairs of results merged, on all cores
+    let mut level: Vec<BezPath> = paths.iter().map(closed_subpaths).filter(|p| !p.elements().is_empty()).collect();
+    if level.is_empty() {
+        return BezPath::new();
+    }
+    if level.len() == 1 {
+        return curve_boolean(&level[0], &BezPath::new(), BoolOp::Union).unwrap_or_else(|| flat_union_each(paths));
+    }
+    use rayon::prelude::*;
+    while level.len() > 1 {
+        let next: Option<Vec<BezPath>> = level
+            .par_chunks(2)
+            .map(|pair| match pair {
+                [a, b] => curve_boolean(a, b, BoolOp::Union),
+                [a] => Some(a.clone()),
+                _ => unreachable!("chunks of two"),
+            })
+            .collect();
+        match next {
+            Some(n) => level = n,
+            None => return flat_union_each(paths),
+        }
+    }
+    level.pop().unwrap_or_default()
+}
+
+/// Union, difference, intersection or exclusive-or of two sets of paths
+/// (closed subpaths, even-odd within each set). Curves stay curves.
+pub fn boolean(a: &[BezPath], b: &[BezPath], op: BoolOp) -> BezPath {
+    curve_boolean(&merge_closed(a), &merge_closed(b), op).unwrap_or_else(|| flat_boolean(a, b, op))
+}
+
+/// The closed subpaths of `path` (as [`flatten`] decides: closed, or ending
+/// where they start), each ending in a close.
+pub(crate) fn closed_subpaths(path: &BezPath) -> BezPath {
+    let mut out = BezPath::new();
+    for sub in subpaths(path) {
+        let els = sub.elements();
+        let Some(PathEl::MoveTo(start)) = els.first().copied() else { continue };
+        if els.len() < 2 {
+            continue;
+        }
+        let closed = matches!(els.last(), Some(PathEl::ClosePath)) || els.last().and_then(|e| e.end_point()).is_some_and(|p| p.distance(start) < 1e-6);
+        if !closed {
+            continue;
+        }
+        out.extend(els.iter().copied().filter(|e| !matches!(e, PathEl::ClosePath)));
+        out.close_path();
+    }
+    out
+}
+
+fn merge_closed(paths: &[BezPath]) -> BezPath {
+    let mut out = BezPath::new();
+    for p in paths {
+        out.extend(closed_subpaths(p).elements().iter().copied());
+    }
+    out
+}
+
+/// A boolean on curves (linesweeper's robust sweep works on the Béziers
+/// themselves), or None if it can't be done.
+fn curve_boolean(a: &BezPath, b: &BezPath, op: BoolOp) -> Option<BezPath> {
+    use linesweeper::{BinaryOp, FillRule};
+    let op = match op {
+        BoolOp::Union => BinaryOp::Union,
+        BoolOp::Difference => BinaryOp::Difference,
+        BoolOp::Intersection => BinaryOp::Intersection,
+        BoolOp::Xor => BinaryOp::Xor,
+    };
+    // a shape it can't handle falls back to the flattened booleans, not a crash
+    let contours = std::panic::catch_unwind(|| linesweeper::binary_op(a, b, FillRule::EvenOdd, op)).ok()?.ok()?;
+    let mut out = BezPath::new();
+    for c in contours.contours() {
+        out.extend(c.path.elements().iter().copied());
+    }
+    Some(out)
+}
+
+/// [`union_each`] on flattened outlines (the fallback).
+fn flat_union_each(paths: &[BezPath]) -> BezPath {
     let mut acc = MultiPolygon::<f64>(vec![]);
     for p in paths {
         if p.elements().is_empty() {
@@ -268,7 +349,8 @@ pub fn union_each(paths: &[BezPath]) -> BezPath {
     from_multipolygon(&acc)
 }
 
-pub fn boolean(a: &[BezPath], b: &[BezPath], op: BoolOp) -> BezPath {
+/// [`boolean`] on flattened outlines (the fallback).
+fn flat_boolean(a: &[BezPath], b: &[BezPath], op: BoolOp) -> BezPath {
     let ma = to_multipolygon(a);
     let mb = to_multipolygon(b);
     let r = match op {
@@ -706,6 +788,28 @@ pub mod affine_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn booleans_keep_curves() {
+        let a = circle_path(Point::new(0.0, 0.0), 20.0);
+        let b = circle_path(Point::new(25.0, 0.0), 20.0);
+        let segs = |p: &BezPath| p.elements().iter().filter(|e| !matches!(e, PathEl::MoveTo(_) | PathEl::ClosePath)).count();
+        let curves = |p: &BezPath| p.elements().iter().filter(|e| matches!(e, PathEl::CurveTo(..))).count();
+        // two circles welded: a handful of curves, not a hundred short lines
+        let w = union_each(&[a.clone(), b.clone()]);
+        assert!(segs(&w) <= 12 && curves(&w) >= 6, "{} segments, {} curves", segs(&w), curves(&w));
+        // the exact area: two discs less the lens they share
+        let (r, d) = (20.0f64, 25.0f64);
+        let lens = 2.0 * r * r * (d / (2.0 * r)).acos() - d / 2.0 * (4.0 * r * r - d * d).sqrt();
+        let truth = 2.0 * std::f64::consts::PI * r * r - lens;
+        assert!((w.area().abs() - truth).abs() / truth < 0.002, "{} vs {truth}", w.area().abs());
+        let cut = boolean(&[a.clone()], &[b.clone()], BoolOp::Difference);
+        assert!(segs(&cut) <= 10 && curves(&cut) >= 4);
+        // a shape with a hole keeps it
+        let ring = merge_paths(&[circle_path(Point::new(100.0, 0.0), 10.0), circle_path(Point::new(100.0, 0.0), 5.0)]);
+        let w = union_each(&[ring, a]);
+        assert_eq!(subpaths(&w).len(), 3, "two outlines and the hole");
+    }
 
     #[test]
     fn union_of_overlapping_squares() {

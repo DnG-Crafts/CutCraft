@@ -18,6 +18,7 @@ pub mod pdfimport;
 pub mod pathtools;
 pub mod raster;
 pub mod script;
+pub mod shapebuilder;
 pub mod shapelib;
 pub mod singleline;
 pub mod tiles;

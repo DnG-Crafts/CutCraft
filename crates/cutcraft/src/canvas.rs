@@ -73,6 +73,8 @@ pub enum Drag {
     Create { start: Point },
     Freehand { pts: Vec<Point> },
     Knife { start: Point },
+    /// Shape builder: the faces dragged across so far.
+    Build { picked: Vec<usize> },
     Eraser { pts: Vec<Point> },
     ImageErase { pts: Vec<Point> },
     /// Image tool in Crop mode: the box being dragged.
@@ -111,6 +113,8 @@ pub struct CanvasState {
     pub highlight: Option<BezPath>,
     /// The last measurement (Measure tool), kept on screen until the next.
     pub measured: Option<(Point, Point)>,
+    /// Shape builder: the faces of the selected shapes, and what they were worked out for.
+    pub builder: Option<((u64, Vec<ShapeId>), Vec<cutcraft_core::shapebuilder::Face>)>,
 }
 
 /// Live symmetry while drawing: new shapes are repeated as mirror images or
@@ -289,6 +293,49 @@ fn add_dimension(app: &mut App, a: Point, b: Point) {
 }
 
 /// Trim tool click: delete the piece of outline under the pointer.
+/// Works out the faces of the selected shapes for the shape builder (when
+/// the selection or the design has changed).
+fn builder_faces(app: &mut App) {
+    let key = (app.rev, app.sel.clone());
+    if app.cs.builder.as_ref().is_some_and(|(k, _)| *k == key) {
+        return;
+    }
+    let page = app.doc.page();
+    let ids = cutcraft_core::ops::z_ordered(&app.doc, &app.sel);
+    let shapes: Vec<Vec<BezPath>> = ids.iter().filter_map(|id| page.shape(*id)).map(|s| s.world_paths()).collect();
+    let faces = if shapes.is_empty() { vec![] } else { cutcraft_core::shapebuilder::faces(&shapes) };
+    app.cs.builder = Some((key, faces));
+}
+
+fn face_under(app: &App, p: Point) -> Option<usize> {
+    app.cs.builder.as_ref().and_then(|(_, faces)| cutcraft_core::shapebuilder::face_at(faces, p))
+}
+
+/// Shape builder: merges the `picked` faces into one shape, or deletes them.
+fn build_shapes(app: &mut App, picked: &[usize], delete: bool) {
+    let Some((_, faces)) = app.cs.builder.clone() else { return };
+    if faces.is_empty() {
+        app.status = "Shape builder: select the overlapping shapes to build with first".into();
+        return;
+    }
+    if picked.is_empty() {
+        app.status = "Shape builder: drag across the areas to merge - or Alt-drag to delete them".into();
+        return;
+    }
+    app.checkpoint_named(if delete { "Shape builder: delete" } else { "Shape builder: merge" });
+    let sel = app.sel.clone();
+    let before: Vec<ShapeId> = app.doc.page().shapes.iter().map(|s| s.id).collect();
+    let made = cutcraft_core::shapebuilder::build(&mut app.doc, &sel, &faces, picked, delete);
+    // everything that came out of it stays selected, to keep building
+    app.sel = app.doc.page().shapes.iter().map(|s| s.id).filter(|id| !before.contains(id)).collect();
+    let n = picked.len();
+    app.status = match (delete, made.is_empty()) {
+        (true, _) => format!("Deleted {n} area{}", if n == 1 { "" } else { "s" }),
+        (false, false) => format!("Merged {n} area{} into one shape", if n == 1 { "" } else { "s" }),
+        (false, true) => "Shape builder: nothing to merge".into(),
+    };
+}
+
 fn trim_click(app: &mut App, cur: Point, tol: f64) {
     let mut doc = app.doc.clone();
     match cutcraft_core::trim::trim_at(&mut doc, cur, tol) {
@@ -811,24 +858,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn texture_for(app: &mut App, ctx: &egui::Context, png: &std::sync::Arc<Vec<u8>>) -> Option<egui::TextureId> {
+fn texture_for(textures: &mut std::collections::HashMap<usize, egui::TextureHandle>, ctx: &egui::Context, png: &std::sync::Arc<Vec<u8>>) -> Option<egui::TextureId> {
     let key = std::sync::Arc::as_ptr(png) as usize;
-    if !app.textures.contains_key(&key) {
+    if !textures.contains_key(&key) {
         let img = image::load_from_memory(png).ok()?;
         let max = 4096;
         let img = if img.width() > max || img.height() > max { img.resize(max, max, image::imageops::FilterType::Triangle) } else { img };
         let rgba = img.to_rgba8();
         let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
         let h = ctx.load_texture(format!("img{key}"), ci, egui::TextureOptions::LINEAR);
-        app.textures.insert(key, h);
+        textures.insert(key, h);
     }
-    app.textures.get(&key).map(|h| h.id())
+    textures.get(&key).map(|h| h.id())
 }
 
 fn draw_scene(app: &mut App, painter: &egui::Painter, ctx: &egui::Context, bg: Color32) {
     let view = &app.view;
     painter.rect_filled(view.canvas, 0.0, bg);
-    let page = app.doc.page().clone();
+    let page = &app.doc.pages[app.doc.active];
     let z = view.zoom;
 
     // cutting mat
@@ -891,73 +938,40 @@ fn draw_scene(app: &mut App, painter: &egui::Painter, ctx: &egui::Context, bg: C
         }
     }
 
-    // shapes
-    let rev = app.rev;
-    let live: Vec<u64> = page.shapes.iter().map(|s| s.id).collect();
-    app.cache.prune(&live);
-    let cut_only = app.cs.show_cut_lines_only;
-    for s in &page.shapes {
-        if !page.is_visible(s) {
-            continue;
-        }
-        let a = s.transform;
-        let layer_col = page.layer(s.layer).map(|l| render::c32(l.color));
-        // collect image draws first to avoid borrowing the cache while loading textures
-        let mut images = vec![];
-        {
-            let cached = app.cache.get(s, rev);
-            for leaf in &cached.leaves {
-                if let Some((png, _, _, w, h, rel)) = &leaf.image {
-                    images.push((png.clone(), *w, *h, a * *rel));
-                    continue;
-                }
-                if !cut_only {
-                    if let Some((v, idx, col)) = &leaf.fill {
-                        if !idx.is_empty() {
-                            let mut mesh = egui::Mesh::default();
-                            for p in v {
-                                mesh.colored_vertex(app.view.to_screen(a * Point::new(p[0] as f64, p[1] as f64)), *col);
-                            }
-                            mesh.indices = idx.clone();
-                            painter.add(egui::Shape::mesh(mesh));
-                        }
-                    }
-                }
-                let (col, w) = if cut_only {
-                    if !leaf.cuts {
-                        continue;
-                    }
-                    (Color32::from_rgb(230, 40, 40), 1.5)
-                } else {
-                    match leaf.stroke {
-                        Some(c) => (c, ((leaf.stroke_width * a.determinant().abs().sqrt()) as f32 * z).max(1.0)),
-                        None if leaf.fill.is_none() => (layer_col.unwrap_or(Color32::GRAY), 1.0),
-                        None => continue,
-                    }
-                };
-                for (pts, closed) in &leaf.lines {
-                    let sp: Vec<Pos2> = pts.iter().map(|p| app.view.to_screen(a * *p)).collect();
-                    if *closed {
-                        painter.add(crate::render::closed_outline(sp, Stroke::new(w, col)));
-                    } else {
-                        painter.add(egui::Shape::line(sp, Stroke::new(w, col)));
-                    }
-                }
+    // shapes: the cached picture (see render.rs)
+    let frame = render::Frame { page, zoom: z, origin: view.to_screen(Point::ORIGIN), canvas: view.canvas, cut_only: app.cs.show_cut_lines_only };
+    let (parts, shift, frame_no) = app.cache.picture(ctx, &frame);
+    // pictures need their textures, which needs `app`: note them, draw after
+    let mut images = vec![];
+    for part in parts {
+        match part {
+            // kept on the graphics card (see gpu.rs)
+            render::Part::Mesh { id, mesh } if app.gpu.available() => {
+                painter.add(app.gpu.draw(*id, mesh, shift, view.canvas, frame_no));
+            }
+            render::Part::Mesh { mesh, .. } if shift == egui::Vec2::ZERO => {
+                painter.add(egui::Shape::Mesh(mesh.clone()));
+            }
+            render::Part::Mesh { mesh, .. } => {
+                let mut m = (**mesh).clone();
+                m.translate(shift);
+                painter.add(egui::Shape::mesh(m));
+            }
+            render::Part::Image { png, w, h, at } => {
+                images.push((painter.add(egui::Shape::Noop), png.clone(), *w, *h, *at));
             }
         }
-        if !cut_only {
-            for (png, w, h, a) in images {
-                if let Some(tex) = texture_for(app, ctx, &png) {
-                    let corners = [Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(w, h), Point::new(0.0, h)];
-                    let uvs = [Pos2::new(0.0, 0.0), Pos2::new(1.0, 0.0), Pos2::new(1.0, 1.0), Pos2::new(0.0, 1.0)];
-                    let mut mesh = egui::Mesh::with_texture(tex);
-                    for (c, uv) in corners.iter().zip(uvs) {
-                        mesh.vertices.push(egui::epaint::Vertex { pos: app.view.to_screen(a * *c), uv, color: Color32::WHITE });
-                    }
-                    mesh.indices = vec![0, 1, 2, 0, 2, 3];
-                    painter.add(egui::Shape::mesh(mesh));
-                }
+    }
+    for (slot, png, w, h, a) in images {
+        if let Some(tex) = texture_for(&mut app.textures, ctx, &png) {
+            let corners = [Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(w, h), Point::new(0.0, h)];
+            let uvs = [Pos2::new(0.0, 0.0), Pos2::new(1.0, 0.0), Pos2::new(1.0, 1.0), Pos2::new(0.0, 1.0)];
+            let mut mesh = egui::Mesh::with_texture(tex);
+            for (c, uv) in corners.iter().zip(uvs) {
+                mesh.vertices.push(egui::epaint::Vertex { pos: app.view.to_screen(a * *c), uv, color: Color32::WHITE });
             }
+            mesh.indices = vec![0, 1, 2, 0, 2, 3];
+            painter.set(slot, egui::Shape::mesh(mesh));
         }
     }
 
@@ -1241,6 +1255,45 @@ fn draw_overlays(app: &mut App, painter: &egui::Painter, ctx: &egui::Context) {
     if app.tool == Tool::Measure && matches!(app.cs.drag, Drag::None) {
         if let Some((a, b)) = app.cs.measured {
             draw_measure(app, painter, a, b);
+        }
+    }
+    // Shape builder: the faces, the one under the pointer, and those dragged across
+    if app.tool == Tool::ShapeBuilder {
+        if let Some((_, faces)) = &app.cs.builder {
+            let delete = painter.ctx().input(|i| i.modifiers.alt);
+            let hot = if delete { Color32::from_rgb(230, 60, 60) } else { crate::chrome::ACCENT };
+            let mut lit: Vec<usize> = match &app.cs.drag {
+                Drag::Build { picked } => picked.clone(),
+                _ => vec![],
+            };
+            if let Some(f) = cursor.and_then(|c| cutcraft_core::shapebuilder::face_at(faces, c)) {
+                if !lit.contains(&f) {
+                    lit.push(f);
+                }
+            }
+            for (i, f) in faces.iter().enumerate() {
+                let on = lit.contains(&i);
+                if on {
+                    let (v, idx) = crate::render::tessellate(std::slice::from_ref(&f.path), 0.05);
+                    let mut mesh = egui::Mesh::default();
+                    for p in v {
+                        mesh.colored_vertex(view.to_screen(Point::new(p[0] as f64, p[1] as f64)), hot.gamma_multiply(0.25));
+                    }
+                    mesh.indices = idx;
+                    painter.add(egui::Shape::mesh(mesh));
+                }
+                for pl in geom::flatten(&f.path, 0.1) {
+                    let mut pts: Vec<Pos2> = pl.pts.iter().map(|q| view.to_screen(*q)).collect();
+                    if on {
+                        painter.add(crate::render::closed_outline(pts, Stroke::new(2.5, hot)));
+                    } else {
+                        if let Some(first) = pts.first().copied() {
+                            pts.push(first);
+                        }
+                        painter.add(egui::Shape::dashed_line(&pts, Stroke::new(1.0, hot.gamma_multiply(0.5)), 4.0, 3.0));
+                    }
+                }
+            }
         }
     }
     // Trim: show the outline a click would trim
@@ -1736,6 +1789,9 @@ fn interact(app: &mut App, resp: &egui::Response, ctx: &egui::Context) {
     let tol = 5.0 / app.view.zoom as f64;
     refresh_snap_points(app);
     app.cs.alignments.clear();
+    if app.tool == Tool::ShapeBuilder {
+        builder_faces(app);
+    }
 
     if esc {
         if !app.cs.poly.is_empty() {
@@ -1794,6 +1850,7 @@ fn interact(app: &mut App, resp: &egui::Response, ctx: &egui::Context) {
             }
             Tool::Freehand => Drag::Freehand { pts: vec![start] },
             Tool::Knife => Drag::Knife { start },
+            Tool::ShapeBuilder => Drag::Build { picked: face_under(app, start).into_iter().collect() },
             Tool::Eraser => Drag::Eraser { pts: vec![start] },
             Tool::ImageEraser => match app.ps.image_mode {
                 ImageMode::Crop => Drag::ImageCrop { start },
@@ -1878,6 +1935,12 @@ fn interact(app: &mut App, resp: &egui::Response, ctx: &egui::Context) {
                 }
                 apply_transforms(app, &orig, Affine::rotate_about(ang, c));
                 app.status = format!("Rotate {:.1}°", ang.to_degrees());
+            }
+            Drag::Build { picked } => {
+                let f = app.cs.builder.as_ref().and_then(|(_, faces)| cutcraft_core::shapebuilder::face_at(faces, cur));
+                if let Some(f) = f.filter(|f| !picked.contains(f)) {
+                    picked.push(f);
+                }
             }
             Drag::Freehand { pts } | Drag::Eraser { pts } | Drag::ImageErase { pts } => {
                 if pts.last().map(|l| l.distance(cur) > 0.3 / app.view.zoom as f64 * 2.0).unwrap_or(true) {
@@ -1967,6 +2030,10 @@ fn interact(app: &mut App, resp: &egui::Response, ctx: &egui::Context) {
                     add_drawn(app, p);
                 }
             }
+            Drag::Build { picked } => {
+                let alt = ctx.input(|i| i.modifiers.alt);
+                build_shapes(app, &picked, alt);
+            }
             Drag::Knife { start } => {
                 app.checkpoint_named("Knife");
                 let parts = ops::knife(&mut app.doc, &[start, cur]);
@@ -2042,6 +2109,10 @@ fn interact(app: &mut App, resp: &egui::Response, ctx: &egui::Context) {
             Tool::Zoom => app.view.zoom_by(if shift { 0.67 } else { 1.5 }, Some(cur_screen)),
             Tool::Corner => corner_click(app, cur_screen, cur, tol),
             Tool::Trim => trim_click(app, cur, 6.0 / app.view.zoom as f64),
+            Tool::ShapeBuilder => {
+                let picked: Vec<usize> = face_under(app, cur).into_iter().collect();
+                build_shapes(app, &picked, ctx.input(|i| i.modifiers.alt));
+            }
             Tool::ImageEraser => match app.ps.image_mode {
                 ImageMode::SelectErase => image_select_erase(app, cur),
                 ImageMode::Erase | ImageMode::Restore => image_erase(app, &[cur], app.ps.image_mode == ImageMode::Restore),

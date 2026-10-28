@@ -16,6 +16,8 @@ egui = "0.36.2"
 fontdb = "0.24"
 image = "0.25"
 lyon_tessellation = "1.0.22"
+rayon = "1.11"
+bytemuck = "1"
 rfd = "0.17.2"
 uuid = "1"
 

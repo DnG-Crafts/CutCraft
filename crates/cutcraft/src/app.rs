@@ -39,11 +39,12 @@ pub enum Tool {
     Measure,
     Dimension,
     Trim,
+    ShapeBuilder,
 }
 
 impl Tool {
     /// Every tool and its tooltip.
-    pub const ALL: [(Tool, &'static str); 21] = [
+    pub const ALL: [(Tool, &'static str); 22] = [
         (Tool::Select, "Select (V)"),
         (Tool::Node, "Edit points (A)"),
         (Tool::Pan, "Pan (H)"),
@@ -65,6 +66,7 @@ impl Tool {
         (Tool::Measure, "Measure (M) - drag between two points to see the distance and angle; nothing is added"),
         (Tool::Dimension, "Dimension - drag between two points to add a labelled dimension (never cut or printed)"),
         (Tool::Trim, "Trim - click a piece of outline to delete it back to the nearest lines crossing it"),
+        (Tool::ShapeBuilder, "Shape builder (Shift+M) - select overlapping shapes, then drag across the areas to merge them into one shape; Alt-drag or Alt-click deletes areas"),
     ];
 }
 
@@ -178,6 +180,8 @@ pub struct App {
     pub status: String,
     pub cache: RenderCache,
     pub textures: std::collections::HashMap<usize, egui::TextureHandle>,
+    /// Keeps the canvas picture on the graphics card.
+    pub gpu: crate::gpu::Gpu,
     pub cs: CanvasState,
     pub rev: u64,
     pub plan: JobPlan,
@@ -266,6 +270,7 @@ impl App {
             status: "Welcome to CutCraft".into(),
             cache: RenderCache::default(),
             textures: Default::default(),
+            gpu: crate::gpu::Gpu::new(cc),
             cs: CanvasState::default(),
             rev: 1,
             plan: JobPlan::default(),
@@ -1206,7 +1211,9 @@ impl App {
             } else if i.key_pressed(Key::Minus) {
                 found = Some(ZoomOut);
             } else if !i.modifiers.command && !i.modifiers.alt {
-                let tool = if i.key_pressed(Key::V) {
+                let tool = if i.modifiers.shift && i.key_pressed(Key::M) {
+                    Some(Tool::ShapeBuilder)
+                } else if i.key_pressed(Key::V) {
                     Some(Tool::Select)
                 } else if i.key_pressed(Key::A) {
                     Some(Tool::Node)

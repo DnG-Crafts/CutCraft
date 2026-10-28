@@ -13,6 +13,8 @@ futures = "0.3.34"
 geo = "0.33.1"
 image = "0.25.10"
 kurbo = "0.13.1"
+linesweeper = "0.5.0"
+rayon = "1.11"
 fcmlib = { path = "../fcmlib" }
 lopdf = "0.45.0"
 nusb = "0.1.14"

@@ -149,7 +149,7 @@ const TOOL_GROUPS: &[&[Tool]] = &[
     &[Tool::Select, Tool::Node, Tool::Pan, Tool::Zoom],
     &[Tool::Line, Tool::Polyline, Tool::Curve, Tool::Freehand],
     &[Tool::Rect, Tool::RoundRect, Tool::Ellipse, Tool::Polygon, Tool::Star, Tool::Text],
-    &[Tool::Knife, Tool::Trim, Tool::Eraser, Tool::ImageEraser, Tool::Corner],
+    &[Tool::Knife, Tool::Trim, Tool::ShapeBuilder, Tool::Eraser, Tool::ImageEraser, Tool::Corner],
     &[Tool::Measure, Tool::Dimension],
 ];
 
@@ -178,6 +178,7 @@ pub fn tool_icon(t: Tool) -> Icon {
         Tool::Measure => Icon::Measure,
         Tool::Dimension => Icon::Dimension,
         Tool::Trim => Icon::Trim,
+        Tool::ShapeBuilder => Icon::ShapeBuilder,
     }
 }
 

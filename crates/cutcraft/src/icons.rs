@@ -60,6 +60,7 @@ pub enum Icon {
     Barcode,
     Corner,
     Trim,
+    ShapeBuilder,
     Knife,
     Dimension,
     Eraser,
@@ -455,6 +456,13 @@ pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, ink: Color32, accent: Color
             line(&[(0.7, 0.5), (0.95, 0.5)], s);
             line(&[(0.4, 0.4), (0.6, 0.6)], a);
             line(&[(0.4, 0.6), (0.6, 0.4)], a);
+        }
+        Icon::ShapeBuilder => {
+            // Two overlapping circles; the arrow (accent) drags across them to merge.
+            p.circle_stroke(at(0.36, 0.52), r.width() * 0.27, s);
+            p.circle_stroke(at(0.64, 0.52), r.width() * 0.27, s);
+            line(&[(0.18, 0.52), (0.82, 0.52)], a);
+            line(&[(0.7, 0.42), (0.82, 0.52), (0.7, 0.62)], a);
         }
         Icon::Knife => {
             // A blade (accent) on a handle, cutting a shape.

@@ -298,6 +298,9 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "as-raw-xcb-connection"
@@ -1234,6 +1237,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "bytemuck",
  "chrono",
  "cutcraft-core",
  "eframe",
@@ -1243,6 +1247,7 @@ dependencies = [
  "gtk",
  "image",
  "lyon_tessellation",
+ "rayon",
  "rfd",
  "serde",
  "serde_json",
@@ -1266,9 +1271,11 @@ dependencies = [
  "geo",
  "image",
  "kurbo",
+ "linesweeper",
  "lopdf",
  "nusb",
  "qrcodegen",
+ "rayon",
  "rhai",
  "serde",
  "serde_json",
@@ -3082,6 +3089,7 @@ dependencies = [
  "arrayvec",
  "euclid",
  "polycool",
+ "serde",
  "smallvec",
 ]
 
@@ -3149,6 +3157,19 @@ name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
+
+[[package]]
+name = "linesweeper"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a25df1b0c5432893f41bba817150e323703ee5f6d974f3a6808ac7fd7f046d18"
+dependencies = [
+ "arrayvec",
+ "kurbo",
+ "polycool",
+ "rustc-hash 2.1.3",
+ "smallvec",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -5131,6 +5152,9 @@ name = "smallvec"
 version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smartstring"

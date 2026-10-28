@@ -419,42 +419,33 @@ pub fn exclude(doc: &mut Document, sel: &[ShapeId]) -> Sel {
     out
 }
 
-/// Divide (shatter): split shapes into every non-overlapping region.
+/// Divide (shatter): split shapes into every non-overlapping region - each
+/// area covered by the same shapes becomes a shape of its own, in the style
+/// of the topmost shape over it.
 pub fn divide(doc: &mut Document, sel: &[ShapeId]) -> Sel {
     let ids = z_ordered(doc, sel);
-    let geoms: Vec<Vec<BezPath>> = ids.iter().map(|id| world(doc, *id)).collect();
-    let style = ids.first().and_then(|id| doc.page().shape(*id)).map(|s| s.style.clone()).unwrap_or_default();
-    let layer = ids.first().and_then(|id| doc.page().shape(*id)).map(|s| s.layer).unwrap_or(0);
-    let mut pieces: Vec<BezPath> = vec![];
-    for (i, g) in geoms.iter().enumerate() {
-        let mut part = g.clone();
-        let others: Vec<BezPath> = geoms.iter().enumerate().filter(|(j, _)| *j != i).flat_map(|(_, g)| g.clone()).collect();
-        // region exclusive to this shape
-        part = vec![geom::boolean(&part, &others, BoolOp::Difference)];
-        pieces.push(part.remove(0));
-        for (j, h) in geoms.iter().enumerate().skip(i + 1) {
-            // pairwise overlaps
-            let rest: Vec<BezPath> =
-                geoms.iter().enumerate().filter(|(k, _)| *k != i && *k != j).flat_map(|(_, g)| g.clone()).collect();
-            let ov = geom::boolean(g, h, BoolOp::Intersection);
-            let ov = geom::boolean(&[ov], &rest, BoolOp::Difference);
-            pieces.push(ov);
-        }
+    let shapes: Vec<Shape> = ids.iter().filter_map(|id| doc.page().shape(*id).cloned()).collect();
+    let geoms: Vec<Vec<BezPath>> = shapes.iter().map(|s| s.world_paths()).collect();
+    let faces = crate::shapebuilder::faces(&geoms);
+    if faces.is_empty() {
+        return sel.to_vec();
     }
     doc.page_mut().shapes.retain(|s| !sel.contains(&s.id));
     let mut out = vec![];
-    for p in pieces {
-        for sp in split_regions(&p) {
-            let mut st = style.clone();
-            st.fill = st.fill.or(None);
-            out.push(doc.add_path(sp, st, layer));
-        }
+    for f in faces {
+        let Some(from) = f.covers.iter().max().and_then(|i| shapes.get(*i)) else { continue };
+        out.push(doc.add_path(f.path, from.style.clone(), from.layer));
     }
     out
 }
 
 /// Split a path into separate regions (each outer ring with its holes).
 pub fn split_regions(path: &BezPath) -> Vec<BezPath> {
+    let r = crate::shapebuilder::regions(path);
+    if !r.is_empty() || path.elements().is_empty() {
+        return r;
+    }
+    // fallback: on flattened outlines
     let mp = geom::to_multipolygon(&[path.clone()]);
     mp.0.iter().map(|p| geom::from_multipolygon(&geo::MultiPolygon(vec![p.clone()]))).collect()
 }
@@ -585,7 +576,8 @@ pub fn erase(doc: &mut Document, stroke: &[Point], radius: f64) {
     }
 }
 
-fn z_ordered(doc: &Document, sel: &[ShapeId]) -> Vec<ShapeId> {
+/// The shapes of `sel`, bottom to top.
+pub fn z_ordered(doc: &Document, sel: &[ShapeId]) -> Vec<ShapeId> {
     doc.page().shapes.iter().filter(|s| sel.contains(&s.id)).map(|s| s.id).collect()
 }
 

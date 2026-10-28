@@ -103,6 +103,8 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev
 
 - Page on a cutting mat, snapping grid, rulers, multiple pages and layers, cut-lines-only view.
 - **Edit bar** above the canvas - type the selection's X/Y, width/height (mm or %), lock the aspect ratio, enter a rotation, and pick which of 9 anchor points they refer to; with text selected it also shows font, size, bold/italic and weld. Dragging or typing in a field is one undo step.
+- **Curves stay curves** - weld, subtract, intersect, divide and the other shape combinations work on the curves themselves (with [linesweeper]), so a welded heart is a few smooth curves rather than hundreds of short straight cuts, and the result is exact.
+- **Shape builder** (Shift+M) - select overlapping shapes, then drag across the areas you want to merge into one shape; Alt-drag (or Alt-click) deletes areas instead. Every area is outlined as you hover, and what's left of each shape keeps its colour.
 - **Measure** (M) - drag between two points for the distance, ΔX/ΔY and angle; nothing is added. **Dimension** - drag to add a labelled dimension line (a drawing aid: not cut, not printed). **Trim** - click a piece of a path to delete it back to the nearest lines crossing it. All three snap to objects and guides.
 - **Symmetry drawing** (View → Symmetry) - shapes you draw are repeated as you draw them: mirror left-right, top-bottom, four-way, or radial mandala (2-64 copies, optionally mirroring alternate slices like a kaleidoscope), about the page centre or the selection's centre. Ghost copies and the axes show while drawing; the set is grouped.
 - **Layer colours** - new shapes take the current layer's colour; moving shapes to another layer, or changing a layer's colour, recolours the shapes that were using the old layer colour (custom colours are kept). **Apply layer colours** (Layers panel) gives every outlined shape its layer's colour. Outline colour is what "By line colour" cutting uses.
@@ -116,7 +118,7 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev
 - **Image tool** - four modes in the edit bar: **Erase** (brush parts away), **Restore** (brush them back from the original), **Select & erase** (click an area of one colour - e.g. a white background - to clear it, with a tolerance and an *everywhere* option), and **Crop** (drag a box to keep just that part).
 - **Parametric design** (Parameters tab) - named values (`thickness = 3`, `slot = thickness + 0.2`) and locked sizes and distances whose values are numbers or formulas (mm, or `2in` / `5cm`). Select one shape to lock its width or height (pick which edge stays still), or two to lock the distance between them (the smaller one moves). Change a parameter and everything that uses it updates; constraints are kept as you edit, shown on the canvas as blue dimensions (View → Show constraints), and saved with the design. A size lock scales the shape, so rounded corners stretch with it.
 - **History panel** - every undo step listed by name (Move, Resize, Weld, Fill & Line…); click one to jump back to it, or forward again to a greyed step you undid.
-- Editing: 200-step undo/redo, cut/copy/paste/paste-in-place/duplicate, group/ungroup, arrange, flip, rotate, scale, shear, align & distribute, weld, subtract, **subtract all** (every shape on top cuts through whatever it overlaps underneath - many holes in one shape, or one shape through several), intersect, **exclude** (remove only the overlaps; each shape keeps its colour), **unite** (cut as one welded outline but keep the parts - ungroup to separate), divide (slice), compound make/release, convert to path, offset (inner/outer, round/sharp), simplify/smooth.
+- Editing: 200-step undo/redo, cut/copy/paste/paste-in-place/duplicate, group/ungroup, arrange, flip, rotate, scale, shear, align & distribute, weld, subtract, **subtract all** (every shape on top cuts through whatever it overlaps underneath - many holes in one shape, or one shape through several), intersect, **exclude** (remove only the overlaps; each shape keeps its colour), **unite** (cut as one welded outline but keep the parts - ungroup to separate), divide (every separate area, however many shapes overlap), compound make/release, convert to path, offset (inner/outer, round/sharp), simplify/smooth.
 - Replicate: rows, columns, rotate, mirror, fill page, advanced (count + offset + per-step rotation).
 - **Fit into box** - scale a design (or text) to fit inside the largest selected shape, centred.
 - Style: fill & line colours (with a **Transparent** swatch, a working opacity slider, and a **screen eyedropper** that picks a colour from anywhere on screen - Windows), line thickness, cut style (no-cut / cut / cut-edge / perforate), don't-print flag.
@@ -249,7 +251,8 @@ CutCraft ships ~120 machine profiles. Selecting a machine sets the correct wire 
 crates/
   cutcraft-core/   UI-free library (all geometry, model, I/O and cutter logic - fully unit-tested)
     doc.rs         Document → Page → Layers + Shapes (path/text/image/group/warp), styles, effect stacks
-    geom.rs        flatten, booleans, offset, stroke outlines, simplify, smooth, dash, primitives
+    geom.rs        flatten, booleans (on curves), offset, stroke outlines, simplify, smooth, dash, primitives
+    shapebuilder.rs  overlapping shapes split into areas: Shape builder and Divide
     curvefit.rs    Bézier curve fitting with sharp corners kept (tracing)
     ops.rs         transform, align/distribute, group, arrange, weld…divide, compound, knife, eraser, replicate
     text.rs        system and added fonts → outlines; text on path, curved text
@@ -300,7 +303,7 @@ The core crate is UI-free, so almost all behaviour (geometry, tracing, nesting, 
 - **Licences** - icons and fonts from the web carry their own licences (shown in CutCraft); many free fonts are for personal use only.
 - **PixScan** uses CutCraft's own marker sheet, not Silhouette's PixScan mat.
 - **Spell-check** needs a Hunspell dictionary installed (none ships with CutCraft).
-- Divide handles pairwise overlaps. Firmware updates and a cloud library are out of scope.
+- Firmware updates and a cloud library are out of scope.
 
 ## License
 
@@ -311,6 +314,7 @@ CutCraft is free software, released under the [GNU General Public License v3.0](
 CutCraft is an independent project and is not affiliated with, or endorsed by, Silhouette America, Graphtec, Brother or any machine manufacturer. Product names are trademarks of their respective owners.
 
 [egui]: https://github.com/emilk/egui
+[linesweeper]: https://crates.io/crates/linesweeper
 [Rhai]: https://rhai.rs
 [Zadig]: https://zadig.akeo.ie/
 [`nusb`]: https://github.com/kevinmehall/nusb

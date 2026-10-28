@@ -8,6 +8,7 @@ mod dialogs;
 mod chrome;
 mod editbar;
 mod eyedrop;
+mod gpu;
 mod icon;
 mod icons;
 mod panels;

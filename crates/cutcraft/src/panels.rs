@@ -832,6 +832,19 @@ fn replicate_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     }
 
     ui.separator();
+    ui.heading("Blend");
+    ui.small("Steps between two shapes: the outline morphs from one to the other, with the colours and line width in between - graduated layers for paper and shadow-box art.");
+    ui.horizontal(|ui| {
+        ui.label("Steps");
+        ui.add(DragValue::new(&mut app.ps.x.blend_steps).range(1..=200));
+        let two = app.editable_sel().len() == 2;
+        if ui.add_enabled(two, egui::Button::new("Blend")).on_disabled_hover_text("Select exactly two shapes").clicked() {
+            let n = app.ps.x.blend_steps;
+            app.edit(|d, s| Some(cutcraft_core::blend::blend(d, s, n)));
+        }
+    });
+
+    ui.separator();
     ui.heading("Fill sheet / batch");
     ui.small("Nests as many copies as fit on the page.");
     ui.checkbox(&mut app.ps.x.batch_rotate, "Allow rotation");

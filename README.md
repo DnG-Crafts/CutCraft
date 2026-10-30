@@ -47,7 +47,7 @@ Most cutting software is either locked behind a subscription and a cloud account
 
 - **Offline & private** - your designs never leave your machine.
 - **One fast native binary** - Rust + [egui]; no Electron, no installer required.
-- **Open formats** - native files are gzipped JSON; import/export SVG, DXF, PDF, G-code and plotter languages.
+- **Open formats** - native files are gzipped JSON; import/export SVG, DXF, PDF, EPS (import), G-code and plotter languages.
 - **Pro features the consumer tools gate or lack** - smooth curve tracing, single-stroke (centre-line) tracing, true-shape nesting, non-destructive effect stacks, packaging dielines, Print & Cut calibration and job costing.
 - **Broad hardware support** - one app speaks to Silhouette, Graphtec, Brother ScanNCut and a large roster of vinyl and craft cutters.
 
@@ -120,6 +120,7 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev
 - **History panel** - every undo step listed by name (Move, Resize, Weld, Fill & Line…); click one to jump back to it, or forward again to a greyed step you undid.
 - Editing: 200-step undo/redo, cut/copy/paste/paste-in-place/duplicate, group/ungroup, arrange, flip, rotate, scale, shear, align & distribute, weld, subtract, **subtract all** (every shape on top cuts through whatever it overlaps underneath - many holes in one shape, or one shape through several), intersect, **exclude** (remove only the overlaps; each shape keeps its colour), **unite** (cut as one welded outline but keep the parts - ungroup to separate), divide (every separate area, however many shapes overlap), compound make/release, convert to path, offset (inner/outer, round/sharp), simplify/smooth.
 - Replicate: rows, columns, rotate, mirror, fill page, advanced (count + offset + per-step rotation).
+- **Blend** (Edit ▸ Replicate) - any number of steps between two shapes: the outline morphs from one to the other (a circle into a star), with the colours and line width in between. Graduated layers for paper and shadow-box art.
 - **Fit into box** - scale a design (or text) to fit inside the largest selected shape, centred.
 - Style: fill & line colours (with a **Transparent** swatch, a working opacity slider, and a **screen eyedropper** that picks a colour from anywhere on screen - Windows), line thickness, cut style (no-cut / cut / cut-edge / perforate), don't-print flag.
 - **Contour** (Style ▸ Fill & Line) - tick which of a shape's outlines are cut, to hide inner lines without breaking the shape up; hovering a line highlights it. It's a live effect, so it can be changed back any time.
@@ -236,14 +237,14 @@ CutCraft ships ~120 machine profiles. Selecting a machine sets the correct wire 
 | | Import | Export |
 |---|---|---|
 | **Native** | `.cutcraft` (gzip JSON) | `.cutcraft` |
-| **Vector** | SVG / SVGZ, DXF, PDF, Adobe Illustrator `.ai` (CS and later) | SVG (with opacity), cut-lines-only SVG, DXF, PDF (Print & Cut) |
+| **Vector** | SVG / SVGZ, DXF, PDF, EPS / PostScript, Adobe Illustrator `.ai` (all versions) | SVG (with opacity), cut-lines-only SVG, DXF, PDF (Print & Cut) |
 | **Raster** | PNG, JPEG, GIF, BMP, TIFF, WebP | - |
 | **Cutter / CNC** | HP-GL (`.plt`, `.hpgl`), Brother ScanNCut `.fcm` | Brother ScanNCut `.fcm`, GPGL, HP-GL (`.plt`), DMPL, G-code (CNC / laser / pen, Z-lift or M3/M5 spindle) |
 | **Fonts** | `.ttf`, `.otf` (added to CutCraft) | `.ttf` (fonts made in CutCraft) |
 
 **Crash recovery:** while there are unsaved changes, a backup is written in the background to the settings folder's `recovery` directory (every 5 minutes by default; Prefs → "Back up unsaved work every", 0 = off). Saving or closing normally deletes it; if CutCraft closed unexpectedly, the next start offers to restore it. Each open window keeps its own backup, so running two copies is safe. Saving is atomic (written to a temporary file, then swapped in), so a crash mid-save can't corrupt the design. CutCraft also remembers its window's position and size, and where you left each popup.
 
-**PDF / AI import** reads the first page's vector paths (lines, curves, rectangles, nested forms) with their fill and stroke colours, at true size; text and embedded images are skipped, with a note in the status bar - convert text to outlines before exporting. **HP-GL import** reads PU/PD/PA/PR, SP (each pen gets its own colour), CI and AA/AR arcs, at 40 units/mm - including CutCraft's own `.plt` export. `.studio3` files are recognised but not decoded - export from Silhouette Studio as SVG/DXF first.
+**PDF / AI import** reads the first page's vector paths (lines, curves, rectangles, nested forms) with their fill and stroke colours, at true size; text and embedded images are skipped, with a note in the status bar - convert text to outlines before exporting. **HP-GL import** reads PU/PD/PA/PR, SP (each pen gets its own colour), CI and AA/AR arcs, at 40 units/mm - including CutCraft's own `.plt` export. **EPS import** reads Illustrator EPS (and the PostScript-based `.ai` files of Illustrator 8 and earlier) by their drawing commands, and EPS from other programs (Inkscape/cairo, CorelDRAW…) through a small PostScript interpreter: paths, transforms, colours, fill and stroke, plus embedded pictures, which come in as images (ready for Image Trace). Text is skipped with a note. `.studio3` files are recognised but not decoded - export from Silhouette Studio as SVG/DXF first.
 
 ## Project layout
 
@@ -277,6 +278,8 @@ crates/
     machines.rs    ~120 machine profiles · materials.rs presets · prefs.rs preferences
     io.rs          .cutcraft, SVG/DXF import+export, PDF, images, G-code
     pdfimport.rs   PDF / Illustrator path import (lopdf)
+    epsimport.rs   EPS / PostScript import (Illustrator drawing commands, a small PostScript interpreter)
+    blend.rs       Blend: steps morphing one shape into another
     hpglimport.rs  HP-GL plotter file import
     trim.rs        Trim tool geometry
     params.rs      parameters, formulas and the constraint solver

@@ -49,8 +49,10 @@ pub enum FileKind {
     Native,
     Svg,
     Dxf,
-    /// PDF, or Illustrator .ai (PDF inside).
+    /// PDF, or Illustrator .ai (PDF inside; older ones are PostScript).
     Pdf,
+    /// EPS / PostScript.
+    Eps,
     /// HP-GL plotter file.
     Hpgl,
     /// Brother ScanNCut / CanvasWorkspace cut file.
@@ -67,6 +69,7 @@ pub fn kind_of(path: &Path) -> FileKind {
         "svg" | "svgz" => FileKind::Svg,
         "dxf" => FileKind::Dxf,
         "pdf" | "ai" => FileKind::Pdf,
+        "eps" | "epsf" | "epsi" | "ps" => FileKind::Eps,
         "plt" | "hpgl" | "hgl" => FileKind::Hpgl,
         "fcm" => FileKind::Fcm,
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" => FileKind::Image,
@@ -76,7 +79,7 @@ pub fn kind_of(path: &Path) -> FileKind {
 }
 
 /// File extensions `import` reads (for open/import dialogs).
-pub const IMPORT_EXTS: [&str; 18] = ["svg", "svgz", "dxf", "pdf", "ai", "plt", "hpgl", "hgl", "fcm", "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "studio3"];
+pub const IMPORT_EXTS: [&str; 22] = ["svg", "svgz", "dxf", "pdf", "ai", "eps", "epsf", "epsi", "ps", "plt", "hpgl", "hgl", "fcm", "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "studio3"];
 
 /// Import a file as shapes (page coordinates, mm). Shapes have id 0 (caller assigns).
 pub fn import(path: &Path, fontdb: Option<Arc<fontdb::Database>>) -> Result<Vec<Shape>> {
@@ -86,7 +89,12 @@ pub fn import(path: &Path, fontdb: Option<Arc<fontdb::Database>>) -> Result<Vec<
 /// Like [`import`], plus notes about anything left out (e.g. a PDF's text).
 pub fn import_with_notes(path: &Path, fontdb: Option<Arc<fontdb::Database>>) -> Result<(Vec<Shape>, Vec<String>)> {
     match kind_of(path) {
-        FileKind::Pdf => crate::pdfimport::import(&std::fs::read(path)?),
+        FileKind::Pdf => {
+            let bytes = std::fs::read(path)?;
+            // Illustrator 8 and older wrote .ai files as PostScript
+            if bytes.starts_with(b"%!") || bytes.starts_with(&[0xC5, 0xD0, 0xD3, 0xC6]) { crate::epsimport::import(&bytes) } else { crate::pdfimport::import(&bytes) }
+        }
+        FileKind::Eps => crate::epsimport::import(&std::fs::read(path)?),
         FileKind::Hpgl => Ok((crate::hpglimport::import(&std::fs::read(path)?)?, vec![])),
         FileKind::Fcm => crate::fcm::import(&std::fs::read(path)?),
         _ => Ok((import_plain(path, fontdb)?, vec![])),
@@ -106,7 +114,7 @@ fn import_plain(path: &Path, fontdb: Option<Arc<fontdb::Database>>) -> Result<Ve
             bail!("Unrecognised Silhouette file")
         }
         FileKind::Native => Ok(load_native(path)?.page().shapes.clone()),
-        FileKind::Pdf | FileKind::Hpgl | FileKind::Fcm => unreachable!("handled by import_with_notes"),
+        FileKind::Pdf | FileKind::Eps | FileKind::Hpgl | FileKind::Fcm => unreachable!("handled by import_with_notes"),
         FileKind::Unknown => bail!("Unsupported file type"),
     }
 }

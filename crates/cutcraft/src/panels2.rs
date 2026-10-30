@@ -99,6 +99,8 @@ pub struct Extra {
     // batch fill
     pub batch_rotate: bool,
     pub batch_per: usize,
+    // blend
+    pub blend_steps: usize,
     // script
     pub script_src: String,
     pub script_msg: String,
@@ -198,6 +200,7 @@ impl Default for Extra {
             die: cutcraft_core::dieline::DielineParams::default(),
             cost: cutcraft_core::cutjob::CostParams::default(),
             batch_rotate: false,
+            blend_steps: 5,
             batch_per: 0,
             script_src: DEFAULT_SCRIPT.into(),
             script_msg: String::new(),

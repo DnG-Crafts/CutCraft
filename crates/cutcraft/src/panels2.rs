@@ -101,6 +101,8 @@ pub struct Extra {
     pub batch_per: usize,
     // blend
     pub blend_steps: usize,
+    // cut a picture with a shape: remove the shape afterwards
+    pub mask_remove_shape: bool,
     // script
     pub script_src: String,
     pub script_msg: String,
@@ -201,6 +203,7 @@ impl Default for Extra {
             cost: cutcraft_core::cutjob::CostParams::default(),
             batch_rotate: false,
             blend_steps: 5,
+            mask_remove_shape: false,
             batch_per: 0,
             script_src: DEFAULT_SCRIPT.into(),
             script_msg: String::new(),
@@ -1172,6 +1175,22 @@ fn adjusted_gray(app: &App, id: ShapeId, max: usize) -> Option<(cutcraft_core::r
     Some((g, img.width_mm, img.height_mm, s.transform))
 }
 
+/// Keeps the selected picture(s) inside the selected shape(s), or cuts the
+/// shapes out of them (one undo step; nothing changes if it can't be done).
+pub fn mask_with_shape(app: &mut App, keep_inside: bool) {
+    let mut doc = app.doc.clone();
+    let remove = app.ps.x.mask_remove_shape;
+    match cutcraft_core::ops::image_mask(&mut doc, &app.sel, keep_inside, remove) {
+        Ok(sel) => {
+            app.checkpoint_named(if keep_inside { "Keep inside shape" } else { "Cut shape out" });
+            app.doc = doc;
+            app.sel = sel;
+            app.status = if keep_inside { "Kept the picture inside the shape - Ctrl+Z to undo".into() } else { "Cut the shape out of the picture - Ctrl+Z to undo".into() };
+        }
+        Err(e) => app.status = format!("Cut with a shape: {e}"),
+    }
+}
+
 pub fn image_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     use cutcraft_core::raster::{self, Effect, LineStyle};
     let units = app.prefs.units;
@@ -1264,6 +1283,24 @@ pub fn image_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     });
 
     // ---- photo to lines (for sketch pens)
+    egui::CollapsingHeader::new("Cut with a shape").default_open(true).show(ui, |ui| {
+        let p = app.doc.page();
+        let shapes = app.sel.iter().filter(|id| p.shape(**id).is_some_and(|s| !matches!(s.kind, cutcraft_core::doc::ShapeKind::Image(_)))).count();
+        if shapes == 0 {
+            ui.small("Draw a shape over the picture, then select both (Shift-click, or drag a box round them) to keep only what's inside the shape, or cut the shape out.");
+        }
+        ui.horizontal_wrapped(|ui| {
+            let ok = shapes > 0;
+            if ui.add_enabled(ok, egui::Button::new("Keep inside shape")).on_hover_text("Removes the picture outside the shape, and trims the picture to it").on_disabled_hover_text("Select the picture and a shape over it").clicked() {
+                mask_with_shape(app, true);
+            }
+            if ui.add_enabled(ok, egui::Button::new("Cut shape out")).on_hover_text("Removes the picture inside the shape, leaving a see-through hole").on_disabled_hover_text("Select the picture and a shape over it").clicked() {
+                mask_with_shape(app, false);
+            }
+        });
+        ui.checkbox(&mut app.ps.x.mask_remove_shape, "Remove the shape afterwards").on_hover_text("Leave it ticked off to keep the shape as a cut line round the picture (Print & Cut)");
+        ui.small("The Restore brush (Image tool) can still paint parts back.");
+    });
     egui::CollapsingHeader::new("Photo → lines (for pens)").show(ui, |ui| {
         let o = &mut app.ps.x.img_lines;
         egui::ComboBox::from_label("Style")

@@ -1593,6 +1593,12 @@ fn image_crop(app: &mut App, r: Rect) {
 
 // ------------------------------------------------------------------ context menu
 
+/// Whether the selection has a shape that isn't a picture (to cut a picture with).
+fn has_cutting_shape(app: &App, sel: &[ShapeId]) -> bool {
+    let p = app.doc.page();
+    sel.iter().any(|id| p.shape(*id).is_some_and(|s| !matches!(s.kind, ShapeKind::Image(_))))
+}
+
 /// Right-click menu on the canvas, with items appropriate to the selection.
 fn selection_context_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     use crate::app::Action::*;
@@ -1740,6 +1746,16 @@ fn selection_context_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context)
     if has_image && ui.button("Trace to cut lines…").clicked() {
         app.do_action(ShowPanel(Panel::Trace), ctx);
         ui.close();
+    }
+    if has_image && has_cutting_shape(app, &sel) {
+        if ui.button("Keep picture inside shape").on_hover_text("Removes the picture outside the selected shape").clicked() {
+            crate::panels2::mask_with_shape(app, true);
+            ui.close();
+        }
+        if ui.button("Cut shape out of picture").on_hover_text("Removes the picture inside the selected shape").clicked() {
+            crate::panels2::mask_with_shape(app, false);
+            ui.close();
+        }
     }
     if has_image && ui.button("Image tools (adjust, photo → lines, shadow box)…").clicked() {
         app.do_action(ShowPanel(Panel::Image), ctx);

@@ -758,6 +758,135 @@ pub fn recolour_outline(s: &mut Shape, from: Option<crate::doc::Rgba>, to: crate
     }
 }
 
+/// Masks the selected pictures with the selected shapes: keeps only the
+/// part of each picture inside the shapes (`keep_inside`, trimming the
+/// picture to them), or cuts the shapes out of it. The shapes stay (a ready
+/// cut line) unless `remove_shapes`. Returns the new selection, or why not.
+pub fn image_mask(doc: &mut Document, sel: &[ShapeId], keep_inside: bool, remove_shapes: bool) -> Result<Sel, String> {
+    let page = doc.page();
+    let is_image = |id: &ShapeId| page.shape(*id).is_some_and(|s| matches!(s.kind, ShapeKind::Image(_)));
+    let images: Vec<ShapeId> = z_ordered(doc, sel).into_iter().filter(is_image).collect();
+    let cutters: Vec<ShapeId> = z_ordered(doc, sel).into_iter().filter(|id| !is_image(id)).collect();
+    if images.is_empty() || cutters.is_empty() {
+        return Err("select a picture and the shape(s) to use on it".into());
+    }
+    let shape: Vec<BezPath> = cutters.iter().flat_map(|id| world(doc, *id)).collect();
+    if geom::flatten_all(&shape, 0.1).iter().all(|p| !p.closed) {
+        return Err("the shape needs to be closed (a line can't cut a picture)".into());
+    }
+    let mut done = 0;
+    let mut last_err = String::new();
+    for id in &images {
+        let Some(s) = doc.page().shape(*id) else { continue };
+        let ShapeKind::Image(img) = &s.kind else { continue };
+        let local = geom::transformed(&shape, s.transform.inverse());
+        let masked = match crate::raster::mask(&img.png, &local, keep_inside, img.width_mm, img.height_mm) {
+            Ok(m) => m,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        // the untouched picture stays, for the Restore brush
+        let original = img.original.clone().unwrap_or_else(|| img.png.clone());
+        // keeping the inside: trim the picture to the shape
+        let trim = keep_inside.then(|| geom::paths_bbox(&local)).flatten().and_then(|b| {
+            let (png, w, h, kept) = crate::raster::crop(&masked, b, img.width_mm, img.height_mm).ok()?;
+            let orig = crate::raster::crop(&original, kept, img.width_mm, img.height_mm).ok().map(|(o, ..)| o);
+            Some((png, w, h, kept, orig))
+        });
+        let Some(s) = doc.page_mut().shape_mut(*id) else { continue };
+        match trim {
+            Some((png, w, h, kept, orig)) => {
+                s.transform = s.transform * Affine::translate(kept.origin().to_vec2());
+                if let ShapeKind::Image(img) = &mut s.kind {
+                    img.png = std::sync::Arc::new(png);
+                    (img.px_w, img.px_h) = (w, h);
+                    (img.width_mm, img.height_mm) = (kept.width(), kept.height());
+                    img.original = orig.map(std::sync::Arc::new);
+                }
+            }
+            None => {
+                if let ShapeKind::Image(img) = &mut s.kind {
+                    img.png = std::sync::Arc::new(masked);
+                    img.original = Some(original);
+                }
+            }
+        }
+        done += 1;
+    }
+    if done == 0 {
+        return Err(if last_err.is_empty() { "nothing to do".into() } else { last_err });
+    }
+    if remove_shapes {
+        doc.page_mut().shapes.retain(|s| !cutters.contains(&s.id));
+        return Ok(images);
+    }
+    Ok(sel.to_vec())
+}
+
+#[cfg(test)]
+mod image_mask_tests {
+    use super::*;
+
+    /// A white 20 x 20 px picture, 20 x 20 mm, at (10, 10), and a circle of
+    /// radius 5 mm over its middle.
+    fn setup() -> (Document, ShapeId, ShapeId) {
+        let mut png = vec![];
+        image::RgbaImage::from_pixel(20, 20, image::Rgba([255, 255, 255, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let mut pic = crate::io::import_image(&png).unwrap();
+        if let ShapeKind::Image(d) = &mut pic.kind {
+            (d.width_mm, d.height_mm) = (20.0, 20.0);
+        }
+        pic.transform = Affine::translate((10.0, 10.0));
+        let mut doc = Document::default();
+        let p = doc.alloc_id();
+        pic.id = p;
+        doc.page_mut().shapes.push(pic);
+        let c = doc.add_path(geom::circle_path(Point::new(20.0, 20.0), 5.0), Style::default(), 0);
+        (doc, p, c)
+    }
+
+    fn alpha(doc: &Document, id: ShapeId, x: u32, y: u32) -> u8 {
+        let ShapeKind::Image(d) = &doc.page().shape(id).unwrap().kind else { panic!() };
+        image::load_from_memory(&d.png).unwrap().to_rgba8().get_pixel(x, y).0[3]
+    }
+
+    #[test]
+    fn keeping_the_inside_trims_to_the_shape() {
+        let (mut doc, p, c) = setup();
+        image_mask(&mut doc, &[p, c], true, false).unwrap();
+        let s = doc.page().shape(p).unwrap();
+        let ShapeKind::Image(d) = &s.kind else { panic!() };
+        // trimmed to the circle's box, about 10 x 10 mm from (15, 15) (whole pixels, rounded out)
+        assert!((10..=11).contains(&d.px_w) && (10..=11).contains(&d.px_h), "{} x {}", d.px_w, d.px_h);
+        let o = s.transform * Point::ORIGIN;
+        assert!((14.0..=15.0).contains(&o.x) && (14.0..=15.0).contains(&o.y), "{o:?}");
+        let mid = d.px_w / 2;
+        assert_eq!(alpha(&doc, p, mid, mid), 255, "the middle stays");
+        assert_eq!(alpha(&doc, p, 0, 0), 0, "the corner, outside the circle, goes");
+        // the shape stays as a cut line; the Restore brush has the original
+        assert!(doc.page().shape(c).is_some());
+        assert!(d.original.is_some());
+    }
+
+    #[test]
+    fn cutting_out_leaves_a_hole() {
+        let (mut doc, p, c) = setup();
+        image_mask(&mut doc, &[p, c], false, true).unwrap();
+        let ShapeKind::Image(d) = &doc.page().shape(p).unwrap().kind else { panic!() };
+        assert_eq!((d.px_w, d.px_h), (20, 20));
+        assert_eq!(alpha(&doc, p, 10, 10), 0, "the middle is cut out");
+        assert_eq!(alpha(&doc, p, 1, 1), 255);
+        // an edge pixel is partly see-through (smooth edge)
+        let edge = (0..20).map(|x| alpha(&doc, p, x, 10)).find(|a| *a > 0 && *a < 255);
+        assert!(edge.is_some());
+        assert!(doc.page().shape(c).is_none(), "asked to remove the shape");
+        // a picture alone isn't enough
+        assert!(image_mask(&mut doc, &[p], true, false).is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

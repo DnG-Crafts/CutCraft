@@ -182,6 +182,69 @@ pub fn crop(bytes: &[u8], r: kurbo::Rect, width: f64, height: f64) -> Result<(Ve
     Ok((png(&out)?, out.width(), out.height(), kept))
 }
 
+/// How much of each pixel (0 to 1) lies inside `paths` (the picture's own
+/// millimetres, even-odd), for a `w` × `h` pixel picture `width` × `height`
+/// mm. Edges are smoothed (4 × 4 samples a pixel).
+fn coverage(paths: &[kurbo::BezPath], w: usize, h: usize, width: f64, height: f64) -> Vec<f32> {
+    const SUB: usize = 4;
+    let (sx, sy) = (w as f64 / width.max(1e-9), h as f64 / height.max(1e-9));
+    // edges in pixels
+    let mut edges: Vec<(f64, f64, f64, f64)> = vec![];
+    for pl in crate::geom::flatten_all(paths, 0.02).into_iter().filter(|p| p.closed && p.pts.len() > 2) {
+        let n = pl.pts.len();
+        for i in 0..n {
+            let (a, b) = (pl.pts[i], pl.pts[(i + 1) % n]);
+            edges.push((a.x * sx, a.y * sy, b.x * sx, b.y * sy));
+        }
+    }
+    let mut cov = vec![0f32; w * h];
+    let mut xs: Vec<f64> = vec![];
+    let step = 1.0 / SUB as f64;
+    for y in 0..h {
+        let row = &mut cov[y * w..(y + 1) * w];
+        for s in 0..SUB {
+            let yy = y as f64 + (s as f64 + 0.5) * step;
+            xs.clear();
+            for &(x0, y0, x1, y1) in &edges {
+                if (y0 <= yy) != (y1 <= yy) {
+                    xs.push(x0 + (yy - y0) / (y1 - y0) * (x1 - x0));
+                }
+            }
+            xs.sort_by(f64::total_cmp);
+            // inside between pairs of crossings: add the covered part of each pixel
+            for pair in xs.chunks_exact(2) {
+                let (a, b) = (pair[0].clamp(0.0, w as f64), pair[1].clamp(0.0, w as f64));
+                if b <= a {
+                    continue;
+                }
+                let (ia, ib) = (a.floor() as usize, (b.ceil() as usize).min(w));
+                for (x, c) in row.iter_mut().enumerate().take(ib).skip(ia) {
+                    let part = (b.min(x as f64 + 1.0) - a.max(x as f64)).max(0.0);
+                    *c += (part * step) as f32;
+                }
+            }
+        }
+    }
+    cov
+}
+
+/// Masks a picture with a shape (`paths`, in the picture's own millimetres):
+/// keeps only what's inside it (`keep_inside`), or cuts it out, leaving a
+/// see-through hole. Edges are smooth.
+pub fn mask(bytes: &[u8], paths: &[kurbo::BezPath], keep_inside: bool, width: f64, height: f64) -> Result<Vec<u8>, String> {
+    let mut img = image::load_from_memory(bytes).map_err(|e| e.to_string())?.to_rgba8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let cov = coverage(paths, w, h, width, height);
+    if !cov.iter().any(|c| *c > 0.0) {
+        return Err("the shape doesn't overlap the picture".into());
+    }
+    for (p, c) in img.pixels_mut().zip(cov) {
+        let k = if keep_inside { c.clamp(0.0, 1.0) } else { 1.0 - c.clamp(0.0, 1.0) };
+        p.0[3] = (p.0[3] as f32 * k).round() as u8;
+    }
+    png(&img)
+}
+
 /// A grayscale working image.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gray {

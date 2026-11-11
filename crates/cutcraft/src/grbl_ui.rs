@@ -393,9 +393,7 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
     // what a scan of holder B found becomes the tool shown for it
     if st.detected != app.ps.x.grbl_detected_seen {
         match st.detected.as_deref() {
-            // the two scoring wheels read the same: keep the one chosen
             Some(n) => match grbl::DriveTool::from_reported(n) {
-                Some(grbl::DriveTool::Score01) if app.ps.x.grbl_b_tool == Some(grbl::DriveTool::Score02) => {}
                 Some(d) => app.ps.x.grbl_b_tool = Some(d),
                 None if n == "not found" => app.ps.x.grbl_b_tool = None,
                 None => {}
@@ -431,6 +429,20 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
                 })
                 .response
                 .on_hover_text("Which tool is in holder B, for finding and saving its height. Detect tool fills this in for the drive-housing tools.");
+            // only while the choice is what the last scan found
+            let scanned = match st.detected.as_deref() {
+                Some("not found") => Some(None),
+                Some(n) => grbl::DriveTool::from_reported(n).map(Some),
+                None => None,
+            };
+            if scanned == Some(app.ps.x.grbl_b_tool) {
+                let (tag, tip) = if app.ps.x.grbl_b_tool.is_some() {
+                    ("✓ detected", "The last Detect tool found this tool in holder B")
+                } else {
+                    ("no drive-housing tool found", "The last Detect tool found no drive-housing tool: holder B is empty, or has the fine-point blade (which can't be scanned)")
+                };
+                ui.label(RichText::new(tag).color(Color32::from_rgb(90, 180, 90))).on_hover_text(tip);
+            }
         });
         ui.horizontal_wrapped(|ui| {
             if ui.button("Load tool").on_hover_text("Lifts both holders, turns steering off and moves the carriage to the middle, so you can reach holder B").clicked() {
@@ -438,15 +450,6 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
             }
             if ui.button("Detect tool").on_hover_text("Homes, then scans the tool in holder B and says which it is (30-40 s). For the drive-housing tools (with a gear on top): the fine-point blade can't be scanned.").clicked() {
                 start_routine(app, link, &grbl::MAKER3_DETECT_TOOL, true);
-            }
-            match st.detected.as_deref() {
-                Some("not found") => {
-                    ui.weak("Last scan: no drive-housing tool");
-                }
-                Some(n) => {
-                    ui.label(RichText::new(format!("Holder B: {}", grbl::reported_label(n))).strong());
-                }
-                None => {}
             }
         });
         ui.horizontal(|ui| {
@@ -586,12 +589,10 @@ fn maker3_settings(app: &mut App, ui: &mut Ui) {
             ui.weak("Height and speed");
             ui.end_row();
             use grbl::Maker3Tool;
-            // the two scoring wheels share a setting
-            let tools = [Maker3Tool::Pen, Maker3Tool::FinePoint].into_iter().chain(grbl::DriveTool::ALL.into_iter().filter(|d| *d != grbl::DriveTool::Score02).map(Maker3Tool::Drive));
+            let tools = [Maker3Tool::Pen, Maker3Tool::FinePoint].into_iter().chain(grbl::DriveTool::ALL.into_iter().map(Maker3Tool::Drive));
             for tool in tools {
                 let label = match tool {
                     Maker3Tool::Pen => "Pen".to_string(),
-                    Maker3Tool::Drive(grbl::DriveTool::Score01) => "Scoring wheels (01 / 02)".to_string(),
                     t => {
                         let l = t.label();
                         l[..1].to_uppercase() + &l[1..]
@@ -645,11 +646,15 @@ fn tool_checklist(job: &cutjob::CutJob, o: &grbl::Maker3Options) -> String {
     s
 }
 
-/// Start Load tool or Detect tool.
+/// Start Load tool or Detect tool. Both park with the pen selected (the
+/// carriage position is given in its numbers), then hand back to holder B,
+/// which is what's being worked on: T1 moves nothing, and the pen is up.
 fn start_routine(app: &mut App, link: &GrblLink, lines: &[&str], detect: bool) {
     app.cancel.store(false, Ordering::Relaxed);
     *app.progress.lock().unwrap() = Default::default();
-    link.routine(lines, detect, app.progress.clone(), app.cancel.clone());
+    let mut lines = lines.to_vec();
+    lines.push("T1");
+    link.routine(&lines, detect, app.progress.clone(), app.cancel.clone());
     app.sending = true;
 }
 

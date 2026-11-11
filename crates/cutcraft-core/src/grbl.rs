@@ -257,8 +257,8 @@ pub fn maker3_reach(tool: Option<u8>) -> (f64, f64) {
 pub enum DriveTool {
     Rotary,
     Knife,
-    Score01,
-    Score02,
+    /// 01 single or 02 double: they have the same spots.
+    Score,
     Perf11,
     Wavy31,
     Deboss21,
@@ -266,11 +266,10 @@ pub enum DriveTool {
 }
 
 impl DriveTool {
-    pub const ALL: [DriveTool; 8] = [
+    pub const ALL: [DriveTool; 7] = [
         DriveTool::Rotary,
         DriveTool::Knife,
-        DriveTool::Score01,
-        DriveTool::Score02,
+        DriveTool::Score,
         DriveTool::Perf11,
         DriveTool::Wavy31,
         DriveTool::Deboss21,
@@ -282,12 +281,11 @@ impl DriveTool {
     }
 
     /// The name the firmware reports after `M3`: `[MSG:Tool <name>, ...]`.
-    /// The two scoring wheels have the same spots, so they read the same.
     pub fn reported(self) -> &'static str {
         match self {
             DriveTool::Rotary => "rotary blade",
             DriveTool::Knife => "knife blade",
-            DriveTool::Score01 | DriveTool::Score02 => "01/02 scoring wheel",
+            DriveTool::Score => "01/02 scoring wheel",
             DriveTool::Perf11 => "11 perforation",
             DriveTool::Wavy31 => "31 wavy blade",
             DriveTool::Deboss21 => "21 fine debossing",
@@ -300,8 +298,7 @@ impl DriveTool {
         match self {
             DriveTool::Rotary => Tool::RotaryBlade,
             DriveTool::Knife => Tool::KnifeBlade,
-            DriveTool::Score01 => Tool::ScoringWheel,
-            DriveTool::Score02 => Tool::DoubleScoringWheel,
+            DriveTool::Score => Tool::ScoringWheel,
             DriveTool::Perf11 => Tool::PerforationBlade,
             DriveTool::Wavy31 => Tool::WavyBlade,
             DriveTool::Deboss21 => Tool::DebossingTip,
@@ -313,7 +310,7 @@ impl DriveTool {
         DriveTool::ALL.into_iter().find(|d| d.tool() == t)
     }
 
-    /// The tool a report names (a scoring wheel reads as the single one).
+    /// The tool a report names.
     pub fn from_reported(name: &str) -> Option<DriveTool> {
         DriveTool::ALL.into_iter().find(|d| d.reported() == name)
     }
@@ -437,7 +434,7 @@ impl Maker3Options {
             Maker3Tool::Drive(d) => match d {
                 DriveTool::Rotary => (self.rotary_z, self.rotary_feed),
                 DriveTool::Knife => (self.knife_z, self.knife_feed),
-                DriveTool::Score01 | DriveTool::Score02 => (self.score_z, self.score_feed),
+                DriveTool::Score => (self.score_z, self.score_feed),
                 DriveTool::Perf11 => (self.perf_z, self.perf_feed),
                 DriveTool::Wavy31 => (self.wavy_z, self.wavy_feed),
                 DriveTool::Deboss21 => (self.deboss_z, self.deboss_feed),
@@ -454,7 +451,7 @@ impl Maker3Options {
             Maker3Tool::Drive(d) => match d {
                 DriveTool::Rotary => (&mut self.rotary_z, &mut self.rotary_feed),
                 DriveTool::Knife => (&mut self.knife_z, &mut self.knife_feed),
-                DriveTool::Score01 | DriveTool::Score02 => (&mut self.score_z, &mut self.score_feed),
+                DriveTool::Score => (&mut self.score_z, &mut self.score_feed),
                 DriveTool::Perf11 => (&mut self.perf_z, &mut self.perf_feed),
                 DriveTool::Wavy31 => (&mut self.wavy_z, &mut self.wavy_feed),
                 DriveTool::Deboss21 => (&mut self.deboss_z, &mut self.deboss_feed),
@@ -667,7 +664,6 @@ pub fn maker3_tools(job: &CutJob) -> Result<Vec<Maker3Tool>, String> {
 /// A tool name as the machine reports it, the way CutCraft shows it.
 pub fn reported_label(name: &str) -> String {
     match DriveTool::from_reported(name) {
-        Some(DriveTool::Score01) => "scoring wheel (01 or 02)".into(),
         Some(d) => d.label().to_lowercase(),
         None => name.to_string(),
     }
@@ -2836,9 +2832,12 @@ mod tests {
     fn maker3_drive_tool_names_line_up_with_the_reports() {
         use crate::materials::Tool;
         assert_eq!(DriveTool::from_reported("knife blade"), Some(DriveTool::Knife));
-        assert_eq!(DriveTool::from_reported("01/02 scoring wheel"), Some(DriveTool::Score01));
-        assert_eq!(DriveTool::from_tool(Tool::DoubleScoringWheel), Some(DriveTool::Score02));
-        assert_eq!(DriveTool::Score02.reported(), "01/02 scoring wheel");
+        assert_eq!(DriveTool::from_reported("01/02 scoring wheel"), Some(DriveTool::Score));
+        assert_eq!(DriveTool::from_tool(Tool::ScoringWheel), Some(DriveTool::Score));
+        assert_eq!(reported_label("01/02 scoring wheel"), "scoring wheel (01 / 02)");
+        // a design saved with the double wheel loads as the scoring wheel
+        let t: Tool = serde_json::from_str("\"DoubleScoringWheel\"").unwrap();
+        assert_eq!(t, Tool::ScoringWheel);
         assert_eq!(DriveTool::from_tool(Tool::AutoBlade), None);
         assert_eq!(reported_label("11 perforation"), "perforation blade (11)");
     }
@@ -2862,6 +2861,13 @@ mod tests {
         assert!(p.message.contains("knife blade"), "{}", p.message);
         assert_eq!(*ran.lock().unwrap(), MAKER3_DETECT_TOOL);
         assert_eq!(link.state().detected.as_deref(), Some("knife blade"));
+        // ending on holder B, as the panel does, is tracked
+        let progress = Arc::new(Mutex::new(Progress::default()));
+        let mut lines = MAKER3_DETECT_TOOL.to_vec();
+        lines.push("T1");
+        link.routine(&lines, true, progress.clone(), Arc::new(AtomicBool::new(false)));
+        wait("the second scan", || progress.lock().unwrap().done);
+        assert_eq!(link.state().tool, Some(1));
         assert!(!link.state().steering);
     }
 

@@ -16,8 +16,10 @@ pub enum Tool {
     StippleTool,
     // Cricut Maker 3 drive-housing tools (holder B)
     KnifeBlade,
+    /// The 01 single or 02 double scoring wheel: the machine can't tell them
+    /// apart, so CutCraft doesn't either.
+    #[serde(alias = "DoubleScoringWheel")]
     ScoringWheel,
-    DoubleScoringWheel,
     PerforationBlade,
     WavyBlade,
     DebossingTip,
@@ -25,7 +27,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 16] = [
+    pub const ALL: [Tool; 15] = [
         Tool::AutoBlade,
         Tool::RatchetBlade,
         Tool::DeepCutBlade,
@@ -37,7 +39,6 @@ impl Tool {
         Tool::StippleTool,
         Tool::KnifeBlade,
         Tool::ScoringWheel,
-        Tool::DoubleScoringWheel,
         Tool::PerforationBlade,
         Tool::WavyBlade,
         Tool::DebossingTip,
@@ -55,8 +56,7 @@ impl Tool {
             Tool::PunchTool => "Punch tool",
             Tool::StippleTool => "Stipple / etching tool",
             Tool::KnifeBlade => "Knife blade",
-            Tool::ScoringWheel => "Scoring wheel (01 single)",
-            Tool::DoubleScoringWheel => "Scoring wheel (02 double)",
+            Tool::ScoringWheel => "Scoring wheel (01 / 02)",
             Tool::PerforationBlade => "Perforation blade (11)",
             Tool::WavyBlade => "Wavy blade (31)",
             Tool::DebossingTip => "Fine debossing tip (21)",
@@ -69,7 +69,7 @@ impl Tool {
 
     /// Tools only the Cricut Maker 3 (on cutcutgo) uses.
     pub fn maker3_only(&self) -> bool {
-        matches!(self, Tool::KnifeBlade | Tool::ScoringWheel | Tool::DoubleScoringWheel | Tool::PerforationBlade | Tool::WavyBlade | Tool::DebossingTip | Tool::EngravingTip)
+        matches!(self, Tool::KnifeBlade | Tool::ScoringWheel | Tool::PerforationBlade | Tool::WavyBlade | Tool::DebossingTip | Tool::EngravingTip)
     }
     /// Swivel-blade tip offset in mm (0 for pens and rotary).
     pub fn blade_offset(&self) -> f64 {

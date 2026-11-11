@@ -19,6 +19,7 @@ lyon_tessellation = "1.0.22"
 rayon = "1.11"
 bytemuck = "1"
 rfd = "0.17.2"
+trash = "5.2.9"
 uuid = "1"
 
 [dev-dependencies]
@@ -37,7 +38,8 @@ wry = "0.57.1"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39.1"
-windows = "0.62.2"
+# printing (File ▸ Print)
+windows = { version = "0.62.2", features = ["Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_System_Memory", "Win32_UI_Controls_Dialogs"] }
 
 # WebKitGTK on Linux, only with the linux-browser feature.
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -484,6 +484,27 @@ pub fn centerline(img: &image::RgbaImage, p: &TraceParams) -> BezPath {
 
 /// Trace an image. Output is in pixel coordinates; map with a transform afterwards.
 ///
+/// The outer outline of a picture's visible part (pixels more than half
+/// opaque), in pixels, as smooth curves - a cut line round a picture with
+/// its background removed. None when the picture has no see-through parts
+/// (its frame is its outline) or nothing visible.
+pub fn visible_outline(img: &image::RgbaImage) -> Option<BezPath> {
+    let opaque = img.pixels().filter(|p| p.0[3] > 127).count();
+    if opaque == 0 || opaque == img.pixels().len() {
+        return None;
+    }
+    // opaque pixels black on white, traced
+    let mut mask = image::RgbaImage::from_pixel(img.width(), img.height(), image::Rgba([255, 255, 255, 255]));
+    for (x, y, p) in img.enumerate_pixels() {
+        if p.0[3] > 127 {
+            mask.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+        }
+    }
+    let params = TraceParams { mode: TraceMode::Threshold, threshold: 128, despeckle: 64, outer_only: true, tolerance: 1.0, smooth: true, ..TraceParams::default() };
+    let path = trace(&mask, &params);
+    (!path.elements().is_empty()).then_some(path)
+}
+
 /// The mask is softened very slightly and its outlines found at sub-pixel
 /// precision (marching squares), so they run smoothly instead of stepping
 /// along pixel edges; then they're fitted with curves, keeping real corners

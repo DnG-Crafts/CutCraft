@@ -5,7 +5,7 @@ use crate::app::{Action, App};
 use crate::render::c32;
 use cutcraft_core::cutjob::{self, GroupMode};
 use cutcraft_core::device::{self, Progress, Transport};
-use cutcraft_core::doc::{Align, CutStyle, Layer, MatKind, Rgba, ShapeKind, TextData};
+use cutcraft_core::doc::{Align, CutStyle, Layer, MatKind, Rgba, ShapeId, ShapeKind, TextData};
 use cutcraft_core::effects::{self, StoneLayout};
 use cutcraft_core::geom::CornerStyle;
 use cutcraft_core::gpgl::{self, JobOptions};
@@ -1479,15 +1479,64 @@ fn pattern_section(app: &mut App, ui: &mut Ui) {
 fn layers_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     ui.heading("Layers");
     let mut remove = None;
-    let cur = app.current_layer();
     let n = app.doc.page().layers.len();
     let now = ui.input(|i| i.time);
     // (layer, old colour, new colour) when a layer's colour is changed
     let mut recolour = None;
-    for i in 0..n {
+    // selecting something on the canvas brings its layer up in the list
+    if app.sel != app.ps.x.layers_seen_sel {
+        app.ps.x.layers_seen_sel = app.sel.clone();
+        let p = app.doc.page();
+        let layers: Vec<u32> = app.sel.iter().filter_map(|id| p.shape(*id)).map(|s| s.layer).collect();
+        if let Some(&l) = layers.first() {
+            if layers.iter().all(|x| *x == l) {
+                app.ps.current_layer = l;
+            }
+        }
+    }
+    let cur = app.current_layer();
+    // objects dropped on a layer row: (objects, layer)
+    let mut dropped_on_layer: Option<(Vec<ShapeId>, u32)> = None;
+    let mut layer_action: Option<(u32, LayerAction)> = None;
+    // the top layer first, as it's drawn
+    for i in (0..n).rev() {
         let id = app.doc.page().layers[i].id;
-        ui.horizontal(|ui| {
-            if ui.radio(cur == id, "").on_hover_text("Current layer for new shapes").clicked() {
+        let count = app.doc.page().shapes.iter().filter(|s| s.layer == id).count();
+        let row = ui.horizontal(|ui| {
+            let grip = ui.add(egui::Label::new(egui::RichText::new("☰").weak()).selectable(false).sense(egui::Sense::click_and_drag())).on_hover_text("Drag up or down to change the layer order (higher layers are drawn and cut on top) · right-click for more");
+            if grip.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            } else if grip.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            if grip.drag_started() {
+                grip.dnd_set_drag_payload(LayerDrag(id));
+            }
+            grip.context_menu(|ui| {
+                let mut pick = |a: LayerAction| layer_action = Some((id, a));
+                if ui.add_enabled(i + 1 < n, egui::Button::new("Bring to top")).clicked() {
+                    pick(LayerAction::MoveTo(n - 1));
+                    ui.close();
+                }
+                if ui.add_enabled(i + 1 < n, egui::Button::new("Move up")).clicked() {
+                    pick(LayerAction::MoveTo(i + 1));
+                    ui.close();
+                }
+                if ui.add_enabled(i > 0, egui::Button::new("Move down")).clicked() {
+                    pick(LayerAction::MoveTo(i.saturating_sub(1)));
+                    ui.close();
+                }
+                if ui.add_enabled(i > 0, egui::Button::new("Send to bottom")).clicked() {
+                    pick(LayerAction::MoveTo(0));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Select everything on this layer").clicked() {
+                    pick(LayerAction::SelectAll);
+                    ui.close();
+                }
+            });
+            if ui.radio(cur == id, "").on_hover_text("Current layer: new shapes go here, and its objects are listed below").clicked() {
                 app.ps.current_layer = id;
             }
             let l = &mut app.doc.pages[app.doc.active].layers[i];
@@ -1503,10 +1552,37 @@ fn layers_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
                 recolour = Some((id, l.color, c32_to_rgba(c)));
             }
             ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(110.0));
-            if n > 1 && ui.small_button("✖").clicked() {
+            ui.add(egui::Label::new(egui::RichText::new(count.to_string()).weak()).selectable(false)).on_hover_text(format!("{count} object(s) on this layer"));
+            if n > 1 && ui.small_button("✖").on_hover_text("Delete the layer (its objects move to the bottom layer)").clicked() {
                 remove = Some(id);
             }
         });
+        // a layer dragged onto this one: above it (top half) or below it
+        let rect = row.response.rect;
+        if let Some(dragged) = row.response.dnd_hover_payload::<LayerDrag>() {
+            if dragged.0 != id {
+                let y = ui.input(|inp| inp.pointer.hover_pos()).map(|p| p.y).unwrap_or(rect.center().y);
+                let above = y < rect.center().y;
+                ui.painter().hline(rect.x_range(), if above { rect.top() } else { rect.bottom() }, egui::Stroke::new(2.0, crate::chrome::ACCENT));
+                if let Some(dragged) = row.response.dnd_release_payload::<LayerDrag>() {
+                    // the list runs top first, so "above" is a higher place in the order
+                    let from = app.doc.page().layer_rank(dragged.0);
+                    let mut to = if above { i + 1 } else { i };
+                    if from < to {
+                        to -= 1;
+                    }
+                    layer_action = Some((dragged.0, LayerAction::MoveTo(to)));
+                }
+            }
+        }
+        // dragging objects from the list onto a layer moves them there
+        if let Some(ids) = row.response.dnd_hover_payload::<Vec<ShapeId>>() {
+            ui.painter().rect_stroke(row.response.rect.expand(2.0), 4.0, egui::Stroke::new(1.5, crate::chrome::ACCENT), egui::StrokeKind::Outside);
+            if let Some(ids) = row.response.dnd_release_payload::<Vec<ShapeId>>() {
+                dropped_on_layer = Some((ids.to_vec(), id));
+            }
+            let _ = ids;
+        }
     }
     if let Some((id, old, new)) = recolour {
         // dragging in the colour picker is one undo step
@@ -1540,24 +1616,6 @@ fn layers_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
             p.layers.push(Layer { id, name: format!("Layer {}", id + 1), visible: true, locked: false, color: cols[id as usize % 4] });
             app.ps.current_layer = id;
         }
-        if ui.button("Move selection here").on_hover_text("Shapes still in their old layer's colour take this layer's colour").clicked() {
-            let l = app.current_layer();
-            app.edit(|d, s| {
-                let page = d.page_mut();
-                let colour = |p: &cutcraft_core::doc::Page, id: u32| p.layer(id).map(|l| l.color);
-                let to = colour(page, l);
-                for id in s {
-                    let from = page.shape(*id).and_then(|sh| colour(page, sh.layer));
-                    if let Some(sh) = page.shape_mut(*id) {
-                        sh.layer = l;
-                        if let (Some(from), Some(to)) = (from, to) {
-                            ops::recolour_outline(sh, Some(from), to);
-                        }
-                    }
-                }
-                None
-            });
-        }
         if ui.button("Apply layer colours").on_hover_text("Give every outlined shape its layer's colour (shapes with only a fill are left alone)").clicked() {
             app.checkpoint();
             let p = app.doc.page_mut();
@@ -1571,25 +1629,201 @@ fn layers_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
             app.status = format!("{n} shape(s) recoloured to their layer's colour");
         }
     });
+    if let Some((id, act)) = layer_action {
+        match act {
+            LayerAction::MoveTo(to) => {
+                if app.doc.page().layer_rank(id) != to {
+                    app.checkpoint_named("Layer order");
+                    app.doc.page_mut().move_layer(id, to);
+                    app.rev += 1;
+                }
+            }
+            LayerAction::SelectAll => {
+                let p = app.doc.page();
+                app.sel = p.shapes.iter().filter(|s| s.layer == id && p.is_editable(s)).map(|s| s.id).collect();
+                app.ps.current_layer = id;
+            }
+        }
+    }
+    if let Some((ids, layer)) = dropped_on_layer {
+        app.checkpoint_named("Move to layer");
+        ops::move_to_layer(&mut app.doc, &ids, layer);
+        app.ps.current_layer = layer;
+        app.status = format!("Moved {} object(s) to {}", ids.len(), app.doc.page().layer(layer).map(|l| l.name.as_str()).unwrap_or("the layer"));
+    }
     ui.separator();
-    ui.heading("Objects");
+    objects_list(app, ui);
+    None
+}
+
+/// A layer being dragged to a new place in the layer order.
+struct LayerDrag(u32);
+
+/// What's done to a layer from its right-click menu.
+enum LayerAction {
+    /// To this place in the layer order (0 = bottom).
+    MoveTo(usize),
+    SelectAll,
+}
+
+/// What's done to objects from the list's right-click menu.
+enum ObjectAction {
+    Arrange(ops::Arrange),
+    ToLayer(u32),
+    Hide(bool),
+    Lock(bool),
+    Duplicate,
+    Delete,
+    SelectLayer,
+}
+
+/// The Objects list: the current layer's objects (or every layer's), top of
+/// the stack first. Click to select (Shift/Ctrl to add), drag to restack or
+/// onto a layer, right-click for more.
+fn objects_list(app: &mut App, ui: &mut Ui) {
+    let cur = app.current_layer();
+    ui.horizontal(|ui| {
+        ui.heading("Objects");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.checkbox(&mut app.ps.x.layers_all, "Show all layers").on_hover_text("List every layer's objects, not just the current layer's");
+        });
+    });
+    let all = app.ps.x.layers_all;
+    let page = app.doc.page();
+    // top of the stack first
+    let rows: Vec<(ShapeId, String, bool, bool, u32)> = page
+        .shapes
+        .iter()
+        .rev()
+        .filter(|s| all || s.layer == cur)
+        .map(|s| (s.id, s.display_name(), s.hidden, s.locked, s.layer))
+        .collect();
+    let layers: Vec<(u32, String)> = page.layers.iter().map(|l| (l.id, l.name.clone())).collect();
+    if rows.is_empty() {
+        ui.weak(if all { "Nothing on this page yet." } else { "Nothing on this layer - draw something, or drag objects here from another layer." });
+    }
     let mut clicked = None;
     let mut toggle_hide = None;
     let mut toggle_lock = None;
-    for s in app.doc.page().shapes.iter().rev() {
-        ui.horizontal(|ui| {
-            if crate::icons::button(ui, crate::icons::Icon::Preview, 20.0, !s.hidden, true, if s.hidden { "Hidden - click to show" } else { "Visible - click to hide" }).clicked() {
-                toggle_hide = Some(s.id);
+    let mut restack: Option<(Vec<ShapeId>, ShapeId, bool)> = None;
+    let mut action: Option<(Vec<ShapeId>, ObjectAction)> = None;
+    let sel = app.sel.clone();
+    // renaming in place: the edit box, a finished name, a rename to start
+    let mut renaming = app.ps.x.renaming.take();
+    let mut renamed: Option<(ShapeId, String)> = None;
+    let mut start_rename: Option<(ShapeId, String)> = None;
+    // the objects an action on `id` applies to: the selection when it's in it
+    let targets = |id: ShapeId| if sel.contains(&id) { sel.clone() } else { vec![id] };
+    egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
+        for (id, name, hidden, locked, layer) in &rows {
+            let (id, hidden, locked) = (*id, *hidden, *locked);
+            let row = ui.horizontal(|ui| {
+                if crate::icons::button(ui, crate::icons::Icon::Preview, 20.0, !hidden, true, if hidden { "Hidden - click to show" } else { "Visible - click to hide" }).clicked() {
+                    toggle_hide = Some(id);
+                }
+                if crate::icons::button(ui, if locked { crate::icons::Icon::Lock } else { crate::icons::Icon::Unlocked }, 20.0, locked, true, if locked { "Locked - click to unlock" } else { "Unlocked - click to lock" }).clicked() {
+                    toggle_lock = Some(id);
+                }
+                let label = if all { format!("{name}  ·  {}", layers.iter().find(|l| l.0 == *layer).map(|l| l.1.as_str()).unwrap_or("?")) } else { name.clone() };
+                if let Some((_, buf, focused)) = renaming.as_mut().filter(|(rid, ..)| *rid == id) {
+                    let te = ui.add(egui::TextEdit::singleline(buf).desired_width(170.0).hint_text(name.as_str()));
+                    if !*focused {
+                        te.request_focus();
+                        *focused = true;
+                    } else if te.lost_focus() {
+                        // Enter or clicking away keeps it; Esc doesn't
+                        let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        renamed = Some((id, if cancel { name.clone() } else { buf.clone() }));
+                    }
+                    return;
+                }
+                let r = ui.add(egui::Button::selectable(sel.contains(&id), label)).interact(egui::Sense::drag()).on_hover_text("Click to select (Shift/Ctrl to add) · double-click to rename · drag up or down to restack, or onto a layer · right-click for more");
+                if r.clicked() {
+                    clicked = Some(id);
+                }
+                if r.double_clicked() {
+                    start_rename = Some((id, name.clone()));
+                }
+                if r.drag_started() {
+                    r.dnd_set_drag_payload(targets(id));
+                }
+                if r.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                }
+                r.context_menu(|ui| {
+                    let t = targets(id);
+                    if t.len() > 1 {
+                        ui.weak(format!("{} selected objects", t.len()));
+                        ui.separator();
+                    }
+                    if t.len() == 1 && ui.button("Rename").clicked() {
+                        start_rename = Some((id, name.clone()));
+                        ui.close();
+                    }
+                    let mut pick = |a: ObjectAction| action = Some((t.clone(), a));
+                    if ui.button("Bring to front").clicked() {
+                        pick(ObjectAction::Arrange(ops::Arrange::Front));
+                        ui.close();
+                    }
+                    if ui.button("Bring forward").clicked() {
+                        pick(ObjectAction::Arrange(ops::Arrange::Forward));
+                        ui.close();
+                    }
+                    if ui.button("Send backward").clicked() {
+                        pick(ObjectAction::Arrange(ops::Arrange::Backward));
+                        ui.close();
+                    }
+                    if ui.button("Send to back").clicked() {
+                        pick(ObjectAction::Arrange(ops::Arrange::Back));
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.menu_button("Move to layer", |ui| {
+                        for (lid, lname) in &layers {
+                            if ui.add_enabled(*lid != *layer || t.len() > 1, egui::Button::new(lname)).clicked() {
+                                pick(ObjectAction::ToLayer(*lid));
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui.button("Select everything on this layer").clicked() {
+                        pick(ObjectAction::SelectLayer);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button(if hidden { "Show" } else { "Hide" }).clicked() {
+                        pick(ObjectAction::Hide(!hidden));
+                        ui.close();
+                    }
+                    if ui.button(if locked { "Unlock" } else { "Lock" }).clicked() {
+                        pick(ObjectAction::Lock(!locked));
+                        ui.close();
+                    }
+                    if ui.button("Duplicate").clicked() {
+                        pick(ObjectAction::Duplicate);
+                        ui.close();
+                    }
+                    if ui.button("Delete").clicked() {
+                        pick(ObjectAction::Delete);
+                        ui.close();
+                    }
+                });
+            });
+            // dropping onto a row: above it (top half) or below it
+            let rect = row.response.rect;
+            if let Some(dragged) = row.response.dnd_hover_payload::<Vec<ShapeId>>() {
+                if !dragged.contains(&id) {
+                    let y = ui.input(|i| i.pointer.hover_pos()).map(|p| p.y).unwrap_or(rect.center().y);
+                    let above = y < rect.center().y;
+                    let ly = if above { rect.top() } else { rect.bottom() };
+                    ui.painter().hline(rect.x_range(), ly, egui::Stroke::new(2.0, crate::chrome::ACCENT));
+                    if let Some(dragged) = row.response.dnd_release_payload::<Vec<ShapeId>>() {
+                        restack = Some((dragged.to_vec(), id, above));
+                    }
+                }
             }
-            if crate::icons::button(ui, if s.locked { crate::icons::Icon::Lock } else { crate::icons::Icon::Unlocked }, 20.0, s.locked, true, if s.locked { "Locked - click to unlock" } else { "Unlocked - click to lock" }).clicked() {
-                toggle_lock = Some(s.id);
-            }
-            let layer = app.doc.page().layer(s.layer).map(|l| l.name.as_str()).unwrap_or("?");
-            if ui.selectable_label(app.sel.contains(&s.id), format!("{}  ·  {}", s.display_name(), layer)).clicked() {
-                clicked = Some(s.id);
-            }
-        });
-    }
+        }
+    });
     if let Some(id) = clicked {
         if ui.input(|i| i.modifiers.shift || i.modifiers.command) {
             if let Some(p) = app.sel.iter().position(|x| *x == id) {
@@ -1614,16 +1848,77 @@ fn layers_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
         }
         app.sel.retain(|x| *x != id);
     }
-    if app.sel.len() == 1 {
-        let id = app.sel[0];
-        if let Some(s) = app.doc.page_mut().shape_mut(id) {
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut s.name);
-            });
+    if let Some((ids, target, above)) = restack {
+        // dropped above a row = drawn over it; from another layer, it joins this one
+        app.checkpoint_named("Restack");
+        let layer = app.doc.page().shape(target).map(|s| s.layer);
+        if let Some(l) = layer {
+            let off: Vec<ShapeId> = ids.iter().copied().filter(|i| app.doc.page().shape(*i).is_some_and(|s| s.layer != l)).collect();
+            ops::move_to_layer(&mut app.doc, &off, l);
+        }
+        ops::move_in_stack(&mut app.doc, &ids, target, above);
+        app.sel = ids;
+    }
+    if let Some((ids, act)) = action {
+        match act {
+            ObjectAction::Arrange(how) => {
+                app.checkpoint_named("Arrange");
+                ops::arrange(&mut app.doc, &ids, how);
+            }
+            ObjectAction::ToLayer(l) => {
+                app.checkpoint_named("Move to layer");
+                ops::move_to_layer(&mut app.doc, &ids, l);
+                app.status = format!("Moved {} object(s) to {}", ids.len(), app.doc.page().layer(l).map(|x| x.name.as_str()).unwrap_or("the layer"));
+            }
+            ObjectAction::Hide(h) => {
+                app.checkpoint();
+                for id in &ids {
+                    if let Some(s) = app.doc.page_mut().shape_mut(*id) {
+                        s.hidden = h;
+                    }
+                }
+            }
+            ObjectAction::Lock(l) => {
+                app.checkpoint();
+                for id in &ids {
+                    if let Some(s) = app.doc.page_mut().shape_mut(*id) {
+                        s.locked = l;
+                    }
+                }
+                if l {
+                    app.sel.retain(|x| !ids.contains(x));
+                }
+            }
+            ObjectAction::Duplicate => {
+                app.checkpoint_named("Duplicate");
+                app.sel = ops::duplicate(&mut app.doc, &ids, cutcraft_core::kurbo::Vec2::new(5.0, 5.0));
+            }
+            ObjectAction::Delete => {
+                app.checkpoint_named("Delete");
+                ops::delete(&mut app.doc, &ids);
+                app.sel.retain(|x| !ids.contains(x));
+            }
+            ObjectAction::SelectLayer => {
+                let l = ids.first().and_then(|id| app.doc.page().shape(*id)).map(|s| s.layer).unwrap_or(cur);
+                let p = app.doc.page();
+                app.sel = p.shapes.iter().filter(|s| s.layer == l && p.is_editable(s)).map(|s| s.id).collect();
+            }
         }
     }
-    None
+    if let Some((id, new)) = renamed {
+        renaming = None;
+        let new = new.trim().to_string();
+        if app.doc.page().shape(id).is_some_and(|s| s.display_name() != new && !new.is_empty()) {
+            app.checkpoint_named("Rename");
+            if let Some(s) = app.doc.page_mut().shape_mut(id) {
+                s.name = new;
+            }
+        }
+    }
+    if let Some((id, current)) = start_rename {
+        renaming = Some((id, current, false));
+    }
+    app.ps.x.renaming = renaming;
 }
 
 // ------------------------------------------------------------------ trace
@@ -2038,18 +2333,35 @@ fn printcut_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     ui.heading("Registration marks");
     let mut r: RegMarks = app.doc.page().regmarks.clone();
     let before = r.clone();
+    // the Maker 3 finds a printed box; other machines find corner marks
+    let maker3 = cutcraft_core::grbl::is_maker3(&app.doc.machine);
+    use cutcraft_core::regmarks::MarkStyle;
+    match (maker3, r.style) {
+        (true, MarkStyle::Corners) => {
+            r.style = MarkStyle::SensorBox;
+            r.inset = r.inset.max(15.0);
+        }
+        (false, MarkStyle::SensorBox) => r.style = MarkStyle::Corners,
+        _ => {}
+    }
     ui.checkbox(&mut r.enabled, "Enable registration marks");
     egui::Grid::new("rm").num_columns(2).show(ui, |ui| {
-        ui.label("Mark length");
-        len_field(ui, &mut r.length, units);
-        ui.end_row();
-        ui.label("Thickness");
-        len_field(ui, &mut r.thickness, units);
-        ui.end_row();
-        ui.label("Inset from edge");
+        if !maker3 {
+            ui.label("Mark length");
+            len_field(ui, &mut r.length, units);
+            ui.end_row();
+            ui.label("Thickness");
+            len_field(ui, &mut r.thickness, units);
+            ui.end_row();
+        }
+        ui.label(if maker3 { "Box inset from edge" } else { "Inset from edge" });
         len_field(ui, &mut r.inset, units);
         ui.end_row();
     });
+    if maker3 {
+        r.inset = r.inset.max(11.0);
+        ui.small("The Maker 3 looks for a 3 mm black box round the artwork. Keep it at least 11 mm in from the page edges (15 is safest), and keep anything else dark at least 15 mm outside it.");
+    }
     if r != before {
         app.checkpoint();
         app.doc.page_mut().regmarks = r;
@@ -2058,12 +2370,20 @@ fn printcut_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     ui.label("Workflow:");
     ui.label("1. Keep artwork inside the dashed orange safe area.");
     ui.label("2. Export the print file and print it at 100% scale.");
-    ui.label("3. Load the printed sheet and Send - the cutter scans the marks first.");
+    if maker3 {
+        ui.label("3. Put the sheet in the mat's top-left corner, load the mat, and Send - the machine scans the box first (about 3 minutes), then cuts.");
+        ui.small("White matt paper works best. If cuts always land off the print the same way, set a Print & Cut correction in the Send panel's Machine settings.");
+    } else {
+        ui.label("3. Load the printed sheet and Send - the cutter scans the marks first.");
+    }
     let mut act = None;
     if ui.button("Export print PDF…").clicked() {
         act = Some(Action::ExportPdf);
     }
     ui.small("Shapes marked “Don't print” and all cut-only lines are left out of the print.");
+    if maker3 {
+        return act;
+    }
     ui.separator();
     ui.heading("Calibration");
     match app.prefs.print_cut_calibration.get(&app.doc.machine) {
@@ -2096,6 +2416,8 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     let m = machines::by_id(&app.doc.machine);
     // a Brother ScanNCut sets force, speed and blade itself: only what each group does matters
     let brother = is_brother(app);
+    let maker3 = cutcraft_core::grbl::is_maker3(&app.doc.machine);
+    let grbl = !brother && protocol(app) == gpgl::Protocol::Grbl;
     let mut changed = false;
     for (gi, g) in app.plan.groups.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -2133,7 +2455,9 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
                 ui.label("Tool");
                 egui::ComboBox::from_id_salt(("tool", gi)).selected_text(g.settings.tool.label()).show_ui(ui, |ui| {
                     for t in CutTool::ALL {
-                        changed |= ui.selectable_value(&mut g.settings.tool, t, t.label()).changed();
+                        if tool_offered(maker3, t) {
+                            changed |= ui.selectable_value(&mut g.settings.tool, t, t.label()).changed();
+                        }
                     }
                 });
                 ui.end_row();
@@ -2146,7 +2470,7 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
                 if brother {
                     return;
                 }
-                if m.tool_slots > 1 {
+                if m.tool_slots > 1 && !maker3 {
                     ui.label("Carriage");
                     ui.horizontal(|ui| {
                         changed |= ui.radio_value(&mut g.slot, 1, "1").changed();
@@ -2154,13 +2478,16 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
                     });
                     ui.end_row();
                 }
-                ui.label("Force");
-                changed |= ui.add(egui::Slider::new(&mut g.settings.force, 1..=m.max_force)).changed();
-                ui.end_row();
-                ui.label("Speed");
-                changed |= ui.add(egui::Slider::new(&mut g.settings.speed, 1..=10)).changed();
-                ui.end_row();
-                if g.settings.tool.is_blade() {
+                // the Maker 3's depth and speed are per-tool settings, in its own section
+                if !maker3 {
+                    ui.label("Force");
+                    changed |= ui.add(egui::Slider::new(&mut g.settings.force, 1..=m.max_force)).changed();
+                    ui.end_row();
+                    ui.label("Speed");
+                    changed |= ui.add(egui::Slider::new(&mut g.settings.speed, 1..=10)).changed();
+                    ui.end_row();
+                }
+                if g.settings.tool.is_blade() && !maker3 {
                     ui.label("Blade depth");
                     changed |= ui.add(egui::Slider::new(&mut g.settings.depth, 0..=10)).changed();
                     ui.end_row();
@@ -2187,8 +2514,10 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
             changed |= ui.add(DragValue::new(&mut app.plan.copies).range(1..=100)).changed();
             changed |= ui.checkbox(&mut app.plan.clip_to_page, "Only cut inside media").changed();
         });
-        ui.checkbox(&mut app.ps.feed_after, "Feed media out when done");
-        ui.checkbox(&mut app.prefs.track_enhancing, "Track enhancing");
+        if !grbl {
+            ui.checkbox(&mut app.ps.feed_after, "Feed media out when done");
+            ui.checkbox(&mut app.prefs.track_enhancing, "Track enhancing");
+        }
     }
     if ui.button("Save current settings as a material…").clicked() {
         if let Some(g) = app.plan.groups.first() {
@@ -2256,8 +2585,8 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
         ui.add(egui::Slider::new(&mut app.cs.preview_t, 0.0..=1.0).show_value(false));
     });
 
-    // ---- protocol (none to choose for a Brother machine)
-    if !brother {
+    // ---- protocol (none to choose for a Brother machine or the Maker 3)
+    if !brother && !maker3 {
         ui.separator();
         ui.heading("Protocol");
         ui.horizontal(|ui| {
@@ -2287,6 +2616,8 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
             if app.prefs.gpgl_dialect == gpgl::GpglDialect::Graphtec {
                 ui.small("Experimental Graphtec command forms - run a test cut first.");
             }
+        } else if protocol(app) == gpgl::Protocol::Grbl {
+            ui.small("G-code streamed over a serial port to a GRBL controller: hobby CNC drag knives, pen plotters and lasers.");
         } else {
             ui.small("HP-GL output for non-Silhouette cutters (Roland, GCC, USCutter, …).");
         }
@@ -2305,7 +2636,10 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
             cutcraft_core::fcm::cut_area_mm(app.doc.page().mat).1
         ));
     }
-    if !brother {
+    if grbl {
+        crate::grbl_ui::section(app, ui);
+    }
+    if !brother && !grbl {
         ui.heading("Connection");
         ui.horizontal(|ui| {
             ui.radio_value(&mut app.ps.conn, Conn::Usb, "USB");
@@ -2384,7 +2718,9 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
             let (page, plan) = (app.doc.page().clone(), app.plan.clone());
             app.save_fcm(&page, &plan, "design.fcm");
         }
-        if ui.add_enabled(app.sending, egui::Button::new("Cancel")).clicked() {
+        let cancel = ui.add_enabled(app.sending, egui::Button::new("Cancel"));
+        let cancel = if maker3 { cancel.on_hover_text("Stops every motor at once and clears the queue. Home the machine afterwards. To carry on later, use Pause instead.") } else { cancel };
+        if cancel.clicked() {
             app.cancel.store(true, Ordering::Relaxed);
         }
     });
@@ -2400,6 +2736,9 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
         ui.small("Connect the ScanNCut by USB and put it on its home screen, then Send. Do a test cut on scrap before cutting good material.");
     } else {
         ui.horizontal(|ui| {
+            if grbl && ui.button("Export G-code…").on_hover_text("Save this job as G-code (.nc) for another sender").clicked() {
+                act = Some(Action::ExportGrbl);
+            }
             if ui.button("Export GPGL…").clicked() {
                 act = Some(Action::ExportGpgl);
             }
@@ -2407,7 +2746,13 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
                 act = Some(Action::ExportPlt);
             }
         });
-        ui.small("⚠ The cutter command set follows public GPGL documentation. Do a test cut on scrap before cutting good material.");
+        ui.small(if maker3 {
+            "⚠ Frame the job and do a Test cut on scrap first. Only paper has been tried on this machine so far, and the blade's trailing tip isn't compensated, so small shapes and corners will be slightly off."
+        } else if grbl {
+            "⚠ Check the origin and Frame the job before cutting, keep a hand near the machine's stop, and never leave a laser running unattended."
+        } else {
+            "⚠ The cutter command set follows public GPGL documentation. Do a test cut on scrap before cutting good material."
+        });
     }
     act
 }
@@ -2455,6 +2800,17 @@ enum Payload {
     Staged(gpgl::Staged),
 }
 
+/// The tools to offer for a group: the Maker 3's own set on that machine
+/// (the pen, the fine-point blade and holder B's drive-housing tools), and
+/// everything but those elsewhere.
+pub fn tool_offered(maker3: bool, t: CutTool) -> bool {
+    if maker3 {
+        matches!(t, CutTool::AutoBlade | CutTool::RatchetBlade | CutTool::DeepCutBlade | CutTool::SketchPen) || cutcraft_core::grbl::DriveTool::from_tool(t).is_some()
+    } else {
+        !t.maker3_only()
+    }
+}
+
 /// Iron-on / heat-transfer and infusible-ink materials are cut mirrored.
 pub fn is_iron_on(m: &materials::Material) -> bool {
     let s = format!("{} {}", m.name, m.category).to_lowercase();
@@ -2470,6 +2826,9 @@ pub fn is_brother(app: &App) -> bool {
 /// format only goes with a Brother machine (an old saved choice falls back
 /// to the machine's own language).
 fn protocol(app: &App) -> gpgl::Protocol {
+    if cutcraft_core::grbl::is_maker3(&app.doc.machine) {
+        return gpgl::Protocol::Grbl;
+    }
     match app.prefs.protocol {
         gpgl::Protocol::Fcm => machines::by_id(&app.doc.machine).protocol,
         p => p,
@@ -2502,6 +2861,13 @@ pub fn send_job(app: &mut App, job: cutjob::CutJob, test: bool) {
         app.status = "Nothing to cut - give shapes a cut style and enable a group".into();
         return;
     }
+    // the Maker 3 changes holders itself; only a swap within a holder pauses
+    let job = if cutcraft_core::grbl::is_maker3(&app.doc.machine) {
+        let Some(job) = crate::grbl_ui::maker3_job(app, job) else { return };
+        job
+    } else {
+        job
+    };
     // a pen part then a blade part on one carriage: pause between them
     let (first, last) = crate::wizards::queue_tool_changes(app, job);
     send_part(app, first, test, last);
@@ -2520,13 +2886,29 @@ pub fn send_part(app: &mut App, mut job: cutjob::CutJob, test: bool, last: bool)
     // Print & Cut: move the lines by this machine's calibration (but not
     // while cutting the calibration sheet itself)
     let calibrating = app.calib.is_some() || cutcraft_core::calibration::is_sheet(app.doc.page());
-    if opt.regmarks.is_some() && !calibrating {
+    let maker3 = cutcraft_core::grbl::is_maker3(&app.doc.machine);
+    // marks printed for another kind of machine can't be found
+    let box_marks = opt.regmarks.as_ref().is_some_and(|r| r.style == cutcraft_core::regmarks::MarkStyle::SensorBox);
+    if opt.regmarks.is_some() && box_marks != maker3 {
+        app.status = if maker3 {
+            "The Maker 3 needs the box-style registration marks - open Page ▸ Registration marks, then print the page again".into()
+        } else {
+            "These registration marks are the Maker 3's box - open Page ▸ Registration marks for this machine's marks, then print the page again".into()
+        };
+        return;
+    }
+    // (the Maker 3 measures the sheet itself, and has its own correction)
+    if opt.regmarks.is_some() && !calibrating && !maker3 {
         if let Some(c) = app.prefs.print_cut_calibration.get(&app.doc.machine) {
             cutcraft_core::calibration::correct_job(&mut job, c);
         }
     }
     if !last {
         opt.feed_after = false;
+    }
+    if protocol(app) == gpgl::Protocol::Grbl {
+        crate::grbl_ui::send(app, &job, opt.regmarks.is_some());
+        return;
     }
     // Use the interactive registration-mark workflow when the Graphtec dialect
     // has reg-marks enabled; otherwise stream the whole job in one shot.
@@ -2541,6 +2923,7 @@ pub fn send_part(app: &mut App, mut job: cutjob::CutJob, test: bool, last: bool)
             gpgl::Protocol::Hpgl => gpgl::encode_hpgl(&job, app.doc.page().height).into_bytes(),
             gpgl::Protocol::Dmpl => gpgl::encode_dmpl(&job, app.doc.page().height).into_bytes(),
             gpgl::Protocol::Fcm => unreachable!("saved as a file above"),
+            gpgl::Protocol::Grbl => unreachable!("streamed above"),
         })
     };
     if app.ps.conn == Conn::Bluetooth {
@@ -2580,10 +2963,18 @@ pub fn send_part(app: &mut App, mut job: cutjob::CutJob, test: bool, last: bool)
 fn test_cut_doc(app: &App) -> (cutcraft_core::doc::Document, cutjob::JobPlan) {
     let mut d = cutcraft_core::doc::Document::default();
     d.page_mut().mat = app.doc.page().mat;
-    let sq = cutcraft_core::geom::rect_path(Rect::new(5.0, 5.0, 15.0, 15.0));
-    let tri = cutcraft_core::geom::polyline_path(&[Point::new(7.0, 13.0), Point::new(10.0, 7.0), Point::new(13.0, 13.0)], true);
-    d.add_path(sq, Default::default(), 0);
-    d.add_path(tri, Default::default(), 0);
+    if cutcraft_core::grbl::is_maker3(&app.doc.machine) {
+        // a letter F at the page centre: it shows if the design comes out turned
+        let (w, h) = (app.doc.page().width, app.doc.page().height);
+        (d.page_mut().width, d.page_mut().height) = (w, h);
+        let f: Vec<Point> = [(0., 0.), (20., 0.), (20., 6.), (6., 6.), (6., 12.), (16., 12.), (16., 18.), (6., 18.), (6., 30.), (0., 30.)].iter().map(|(x, y)| Point::new(w / 2.0 - 10.0 + x, h / 2.0 - 15.0 + y)).collect();
+        d.add_path(cutcraft_core::geom::polyline_path(&f, true), Default::default(), 0);
+    } else {
+        let sq = cutcraft_core::geom::rect_path(Rect::new(5.0, 5.0, 15.0, 15.0));
+        let tri = cutcraft_core::geom::polyline_path(&[Point::new(7.0, 13.0), Point::new(10.0, 7.0), Point::new(13.0, 13.0)], true);
+        d.add_path(sq, Default::default(), 0);
+        d.add_path(tri, Default::default(), 0);
+    }
     let mut plan = app.plan.clone();
     plan.mode = GroupMode::Simple;
     plan.copies = 1;

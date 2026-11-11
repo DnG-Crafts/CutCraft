@@ -526,6 +526,36 @@ impl Page {
         self.layers.iter().find(|l| l.id == id)
     }
 
+    /// Where a layer is in the layer order (0 = bottom); unknown layers count
+    /// as the bottom.
+    pub fn layer_rank(&self, id: u32) -> usize {
+        self.layers.iter().position(|l| l.id == id).unwrap_or(0)
+    }
+
+    /// Keeps the stack in layer order: everything on a higher layer above
+    /// everything on a lower one, each layer's own order kept. Returns
+    /// whether anything moved.
+    pub fn keep_layer_order(&mut self) -> bool {
+        let ranks: Vec<usize> = self.shapes.iter().map(|s| self.layer_rank(s.layer)).collect();
+        if ranks.is_sorted() {
+            return false;
+        }
+        let mut order: Vec<usize> = (0..self.shapes.len()).collect();
+        order.sort_by_key(|&i| ranks[i]);
+        let mut old: Vec<Option<Shape>> = std::mem::take(&mut self.shapes).into_iter().map(Some).collect();
+        self.shapes = order.into_iter().filter_map(|i| old[i].take()).collect();
+        true
+    }
+
+    /// Moves a layer to `to` in the layer order (0 = bottom), and the stack
+    /// with it.
+    pub fn move_layer(&mut self, id: u32, to: usize) {
+        let Some(from) = self.layers.iter().position(|l| l.id == id) else { return };
+        let l = self.layers.remove(from);
+        self.layers.insert(to.min(self.layers.len()), l);
+        self.keep_layer_order();
+    }
+
     pub fn shape_index(&self, id: ShapeId) -> Option<usize> {
         self.shapes.iter().position(|s| s.id == id)
     }

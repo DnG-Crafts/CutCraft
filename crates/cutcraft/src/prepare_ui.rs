@@ -352,6 +352,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut Ui) -> bool {
         ui.add_space(4.0);
         let mut mats = materials::builtin();
         mats.extend(app.prefs.user_materials.clone());
+        let maker3_machine = cutcraft_core::grbl::is_maker3(&app.doc.machine);
         if let Some(g) = app.plan.groups.get_mut(gi) {
             egui::Grid::new("prep-mat").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                 ui.label("Material");
@@ -374,7 +375,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, ui: &mut Ui) -> bool {
                 ui.end_row();
                 ui.label("Tool");
                 egui::ComboBox::from_id_salt("prep-tool").selected_text(g.settings.tool.label()).show_ui(ui, |ui| {
-                    for t in CutTool::ALL {
+                    for t in CutTool::ALL.into_iter().filter(|t| crate::panels::tool_offered(maker3_machine, *t)) {
                         ui.selectable_value(&mut g.settings.tool, t, t.label());
                     }
                 });

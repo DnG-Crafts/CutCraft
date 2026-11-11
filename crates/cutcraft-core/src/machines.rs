@@ -2,7 +2,7 @@
 
 use crate::doc::MatKind;
 use crate::gpgl::Protocol;
-use crate::gpgl::Protocol::{Dmpl, Fcm, Gpgl, Hpgl};
+use crate::gpgl::Protocol::{Dmpl, Fcm, Gpgl, Grbl, Hpgl};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Machine {
@@ -290,6 +290,16 @@ pub const MACHINES: &[Machine] = &[
     Machine { id: "pazzles_mighty", name: "Pazzles Inspiration Mighty", protocol: Hpgl, max_width: 12.0 * IN, max_length: 3000.0, tool_slots: 1,
         mats: &[MatKind::Mat12x12, MatKind::None], default_mat: MatKind::Mat12x12,
         bluetooth: false, regmarks: false, usb_ids: &[], max_force: 250 },
+    // --- Cricut Maker 3 running the cutcutgo firmware: GRBL with its own rules, see grbl.rs.
+    // Its serial port is found by USB id in the GRBL panel, so no usb_ids here.
+    Machine { id: crate::grbl::MAKER3_ID, name: "Cricut Maker 3 (cutcutgo firmware)", protocol: Grbl, max_width: 12.0 * IN, max_length: 24.0 * IN, tool_slots: 2,
+        mats: &[MatKind::Mat12x12, MatKind::Mat12x24], default_mat: MatKind::Mat12x12,
+        bluetooth: false, regmarks: false, usb_ids: &[], max_force: 33 },
+    // --- GRBL (G-code over a serial port): hobby CNC drag knives, pen plotters, diode lasers.
+    // The work area is nominal: set the real size in Page setup. Force is the laser power in %.
+    Machine { id: "grbl", name: "GRBL machine (CNC / plotter / laser)", protocol: Grbl, max_width: 300.0, max_length: 300.0, tool_slots: 1,
+        mats: &[MatKind::None, MatKind::Mat12x12], default_mat: MatKind::None,
+        bluetooth: false, regmarks: false, usb_ids: &[], max_force: 100 },
 ];
 
 /// Match a Windows USB device-interface path (e.g. `...vid_0b4d&pid_1137...`) to a known

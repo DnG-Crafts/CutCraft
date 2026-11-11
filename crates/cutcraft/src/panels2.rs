@@ -103,6 +103,25 @@ pub struct Extra {
     pub blend_steps: usize,
     // cut a picture with a shape: remove the shape afterwards
     pub mask_remove_shape: bool,
+    // layers panel: list every layer's objects, and the selection last seen
+    pub layers_all: bool,
+    pub layers_seen_sel: Vec<cutcraft_core::doc::ShapeId>,
+    /// An object being renamed in the layers panel: (object, new name, focused yet).
+    pub renaming: Option<(cutcraft_core::doc::ShapeId, String, bool)>,
+    /// GRBL: the open connection, the serial ports found, jog step and speed,
+    /// and the console's input line.
+    pub grbl: Option<cutcraft_core::grbl::GrblLink>,
+    pub grbl_ports: Vec<cutcraft_core::grbl::Port>,
+    pub grbl_scanned: Option<cutcraft_core::grbl::Dialect>,
+    /// When the last Maker 3 jog can be assumed to show in the reported position.
+    pub grbl_jog_until: f64,
+    /// Maker 3: the tool in holder B (None: the fine-point blade), and the
+    /// last scan result already applied to it.
+    pub grbl_b_tool: Option<cutcraft_core::grbl::DriveTool>,
+    pub grbl_detected_seen: Option<String>,
+    pub grbl_step: f64,
+    pub grbl_jog_feed: f64,
+    pub grbl_cmd: String,
     // script
     pub script_src: String,
     pub script_msg: String,
@@ -112,9 +131,14 @@ pub struct Extra {
     pub img_plates: usize,
     pub img_border: f64,
     pub img_smooth: f64,
-    /// Preview cache: (image id, base thumbnail) and (id, adjustments, texture).
-    pub img_base: Option<(ShapeId, cutcraft_core::raster::Gray)>,
+    /// Preview cache: (image id, its picture's bytes, a reduced copy) and
+    /// (id, adjustments, the adjusted copy as a texture).
+    pub img_base: Option<(ShapeId, usize, image::RgbaImage)>,
     pub img_prev: Option<(ShapeId, cutcraft_core::raster::Adjustments, egui::TextureHandle)>,
+    /// The adjusted picture shown on the canvas in place of the real one
+    /// while the Image panel is open: (the picture's bytes, texture, the
+    /// pass it was last shown in).
+    pub img_canvas: Option<(usize, egui::TextureHandle, u64)>,
     // art panel (ported from BurnCraft)
     pub art_size: f64,
     pub border_len: f64,
@@ -204,6 +228,18 @@ impl Default for Extra {
             batch_rotate: false,
             blend_steps: 5,
             mask_remove_shape: false,
+            layers_all: false,
+            layers_seen_sel: vec![],
+            renaming: None,
+            grbl: None,
+            grbl_ports: vec![],
+            grbl_scanned: None,
+            grbl_jog_until: 0.0,
+            grbl_b_tool: None,
+            grbl_detected_seen: None,
+            grbl_step: 10.0,
+            grbl_jog_feed: 1500.0,
+            grbl_cmd: String::new(),
             batch_per: 0,
             script_src: DEFAULT_SCRIPT.into(),
             script_msg: String::new(),
@@ -214,6 +250,7 @@ impl Default for Extra {
             img_smooth: 1.5,
             img_base: None,
             img_prev: None,
+            img_canvas: None,
             art_size: 60.0,
             border_len: 200.0,
             border_h: 25.0,
@@ -1196,7 +1233,25 @@ pub fn image_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     let units = app.prefs.units;
     ui.heading("Image");
     let Some(id) = selected_image(app) else {
-        ui.label("Select an image (File ▸ Import or drag one onto the window).");
+        // a Print & Cut picture is grouped with its cut line
+        let page = app.doc.page();
+        let grouped = app.sel.iter().copied().find(|id| page.shape(*id).is_some_and(|s| matches!(&s.kind, ShapeKind::Group(ch) if ch.iter().any(|c| c.is_image()))));
+        match grouped {
+            Some(g) => {
+                ui.label("This picture is grouped with its cut line (it was added for Print & Cut).");
+                ui.small("Ungroup to work on the picture itself. The cut line stays set not to print, so Print & Cut still works; select both and Group again afterwards to move them together.");
+                if ui.button("Ungroup to edit the picture").clicked() {
+                    app.checkpoint_named("Ungroup");
+                    let parts = cutcraft_core::ops::ungroup(&mut app.doc, &[g]);
+                    let page = app.doc.page();
+                    app.sel = parts.into_iter().filter(|id| page.shape(*id).is_some_and(|s| s.is_image())).collect();
+                    app.rev += 1;
+                }
+            }
+            None => {
+                ui.label("Select an image (File ▸ Import or drag one onto the window).");
+            }
+        }
         return None;
     };
 
@@ -1237,47 +1292,76 @@ pub fn image_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
             }
         });
 
-        // Live preview from a cached small thumbnail.
-        if app.ps.x.img_base.as_ref().map(|(i, _)| *i != id).unwrap_or(true) {
-            app.ps.x.img_base = app.doc.page().shape(id).and_then(|s| match &s.kind {
-                ShapeKind::Image(img) => raster::Gray::decode(&img.png).ok().map(|g| (id, g.fit(240))),
-                _ => None,
+        // a reduced copy of the picture, adjusted as the sliders move
+        let png = app.doc.page().shape(id).and_then(|s| match &s.kind {
+            ShapeKind::Image(img) => Some(img.png.clone()),
+            _ => None,
+        });
+        let Some(png) = png else { return };
+        let key = Arc::as_ptr(&png) as usize;
+        if app.ps.x.img_base.as_ref().is_none_or(|(i, k, _)| *i != id || *k != key) {
+            app.ps.x.img_base = image::load_from_memory(&png).ok().map(|d| {
+                let d = if d.width().max(d.height()) > 1200 { d.resize(1200, 1200, image::imageops::FilterType::Triangle) } else { d };
+                (id, key, d.to_rgba8())
             });
             app.ps.x.img_prev = None;
         }
         let adj = app.ps.x.img_adj;
         let stale = app.ps.x.img_prev.as_ref().map(|(i, a, _)| *i != id || *a != adj).unwrap_or(true);
         if stale {
-            if let Some((_, base)) = &app.ps.x.img_base {
-                let mut g = base.clone();
-                g.adjust(&adj);
-                let rgba = g.to_rgba8();
+            if let Some((_, _, base)) = &app.ps.x.img_base {
+                let rgba = raster::adjust_rgba(base, &adj);
                 let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
                 app.ps.x.img_prev = Some((id, adj, ui.ctx().load_texture("img-adjust", ci, egui::TextureOptions::LINEAR)));
             }
         }
+        // on the canvas too, while the panel's open
+        app.ps.x.img_canvas = match (&app.ps.x.img_prev, adj.is_neutral()) {
+            (Some((_, _, tex)), false) => Some((key, tex.clone(), ui.ctx().cumulative_pass_nr())),
+            _ => None,
+        };
         if let Some((_, _, tex)) = &app.ps.x.img_prev {
             let s = tex.size_vec2();
             let k = (220.0 / s.x.max(s.y)).min(1.0);
-            ui.image((tex.id(), s * k));
-        }
-        ui.small("Adjustments feed Photo → lines and Shadow box below (the image itself is untouched).");
-        if ui.button("Bake into image (grayscale)").on_hover_text("Rewrite the picture with these adjustments, e.g. before Trace. Undoable.").clicked() {
-            if let Some((g, ..)) = adjusted_gray(app, id, 4000) {
-                let mut png = std::io::Cursor::new(Vec::new());
-                if g.to_rgba8().write_to(&mut png, image::ImageFormat::Png).is_ok() {
-                    app.checkpoint();
-                    if let Some(s) = app.doc.page_mut().shape_mut(id) {
-                        if let ShapeKind::Image(img) = &mut s.kind {
-                            img.png = Arc::new(png.into_inner());
-                            img.px_w = g.width as u32;
-                            img.px_h = g.height as u32;
-                        }
-                    }
-                    app.ps.x.img_adj = Default::default();
-                    app.ps.x.img_base = None;
-                    app.status = "Adjustments baked into the image".into();
+            let (rect, _) = ui.allocate_exact_size(s * k, egui::Sense::hover());
+            // a checkerboard shows what's see-through
+            let cell = 8.0;
+            let painter = ui.painter_at(rect);
+            for (iy, y) in (0..(rect.height() / cell).ceil() as i32).map(|i| (i, rect.top() + i as f32 * cell)) {
+                for (ix, x) in (0..(rect.width() / cell).ceil() as i32).map(|i| (i, rect.left() + i as f32 * cell)) {
+                    let c = if (ix + iy) % 2 == 0 { egui::Color32::from_gray(205) } else { egui::Color32::from_gray(245) };
+                    painter.rect_filled(egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell, cell)), 0.0, c);
                 }
+            }
+            painter.image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+        }
+        ui.small("The picture on the canvas shows these as you move them. Apply to keep them; Photo → lines and Shadow box below use them too.");
+        let apply = ui.add_enabled(!adj.is_neutral(), egui::Button::new("Apply to picture")).on_hover_text("Writes these adjustments into the picture (in colour; Remove background makes the backdrop see-through). Ctrl+Z undoes it, and the Restore brush can paint the original back.");
+        if apply.clicked() {
+            match image::load_from_memory(&png) {
+                Ok(full) => {
+                    let out = raster::adjust_rgba(&full.to_rgba8(), &adj);
+                    let mut bytes = std::io::Cursor::new(Vec::new());
+                    if out.write_to(&mut bytes, image::ImageFormat::Png).is_ok() {
+                        app.checkpoint_named("Adjust picture");
+                        if let Some(s) = app.doc.page_mut().shape_mut(id) {
+                            if let ShapeKind::Image(img) = &mut s.kind {
+                                // the untouched picture stays, for the Restore brush
+                                if img.original.is_none() {
+                                    img.original = Some(img.png.clone());
+                                }
+                                img.png = Arc::new(bytes.into_inner());
+                                img.px_w = out.width();
+                                img.px_h = out.height();
+                            }
+                        }
+                        app.ps.x.img_adj = Default::default();
+                        app.ps.x.img_base = None;
+                        app.ps.x.img_canvas = None;
+                        app.status = "Adjustments applied to the picture - Ctrl+Z to undo".into();
+                    }
+                }
+                Err(e) => app.status = format!("Couldn't adjust the picture: {e}"),
             }
         }
     });

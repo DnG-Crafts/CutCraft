@@ -98,7 +98,9 @@ pub enum Action {
     ExportSvgCut,
     ExportDxf,
     ExportGcode,
+    ExportGrbl,
     ExportPdf,
+    Print,
     ExportGpgl,
     ExportPlt,
     ExportFcm,
@@ -200,6 +202,8 @@ pub struct App {
     pub prepare: Option<crate::prepare_ui::PrepareView>,
     /// The image upload wizard, while open.
     pub upload: Option<crate::wizards::UploadWizard>,
+    /// The printer dialog (macOS and Linux), while it's open.
+    pub print_dialog: Option<crate::print::PrintDialog>,
     /// The Print & Cut calibration wizard, while open.
     pub calib: Option<crate::calibrate::Wizard>,
     /// Picking a colour from the screen.
@@ -283,6 +287,7 @@ impl App {
             constraint_errors: Vec::new(),
             prepare: None,
             upload: None,
+            print_dialog: None,
             calib: None,
             eyedrop: Default::default(),
             web: Default::default(),
@@ -559,6 +564,19 @@ impl App {
             Protocol::Hpgl => self.export_text("plt", "HP-GL", cutcraft_core::gpgl::encode_hpgl(&job, h)),
             Protocol::Dmpl => self.export_text("dmpl", "DMPL", cutcraft_core::gpgl::encode_dmpl(&job, h)),
             Protocol::Fcm => unreachable!("saved above"),
+            Protocol::Grbl if cutcraft_core::grbl::is_maker3(&self.doc.machine) => {
+                let bed = cutcraft_core::grbl::maker3_bed(self.doc.page().mat);
+                match cutcraft_core::grbl::encode_maker3(&job, bed, &self.prefs.maker3) {
+                    Ok(lines) => self.export_text("nc", "G-code", lines.join("\n") + "\n"),
+                    Err(e) => self.status = e,
+                }
+            }
+            Protocol::Grbl => {
+                let m = cutcraft_core::machines::by_id(&self.doc.machine);
+                let mut g = cutcraft_core::grbl::encode(&job, h, m.max_force, &self.prefs.grbl).join("\n");
+                g.push('\n');
+                self.export_text("nc", "G-code", g)
+            }
             Protocol::Gpgl => {
                 let bytes = cutcraft_core::gpgl::encode(&job, &crate::panels::job_options(self));
                 if let Some(p) = rfd::FileDialog::new().add_filter("GPGL", &["gpgl"]).set_file_name("job.gpgl").save_file() {
@@ -742,6 +760,7 @@ impl App {
                 let s = io::export_dxf(self.doc.page());
                 self.export_text("dxf", "DXF", s)
             }
+            Print => crate::print::start(self),
             ExportPdf => {
                 if let Some(p) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name("print.pdf").save_file() {
                     self.status = match io::export_print_pdf(self.doc.page(), &p) {
@@ -758,6 +777,7 @@ impl App {
             ExportPlt => self.export_job(cutcraft_core::gpgl::Protocol::Hpgl),
             ExportFcm => self.export_job(cutcraft_core::gpgl::Protocol::Fcm),
             ExportDmpl => self.export_job(cutcraft_core::gpgl::Protocol::Dmpl),
+            ExportGrbl => self.export_job(cutcraft_core::gpgl::Protocol::Grbl),
             Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Undo => self.undo(),
             Redo => self.redo(),
@@ -829,7 +849,7 @@ impl App {
                 ops::distribute(d, s, false);
                 None
             }),
-            Weld => self.need(2, |d, s| ops::weld(d, s)),
+            Weld => self.need_shapes(2, |d, s| ops::weld(d, s)),
             ClearGuides => {
                 if !self.doc.page().guides.is_empty() {
                     self.checkpoint();
@@ -856,14 +876,14 @@ impl App {
                 }
                 s.to_vec()
             }),
-            Subtract => self.need(2, |d, s| ops::subtract(d, s)),
-            SubtractAll => self.need(2, |d, s| ops::subtract_all(d, s)),
-            Intersect => self.need(2, |d, s| ops::intersect(d, s)),
-            Exclude => self.need(2, |d, s| ops::exclude(d, s)),
-            Unite => self.need(2, |d, s| ops::unite(d, s)),
+            Subtract => self.need_shapes(2, |d, s| ops::subtract(d, s)),
+            SubtractAll => self.need_shapes(2, |d, s| ops::subtract_all(d, s)),
+            Intersect => self.need_shapes(2, |d, s| ops::intersect(d, s)),
+            Exclude => self.need_shapes(2, |d, s| ops::exclude(d, s)),
+            Unite => self.need_shapes(2, |d, s| ops::unite(d, s)),
             Flatten => self.need(1, |d, s| cutcraft_core::printflat::flatten(d, s)),
             Unflatten => self.need(1, |d, s| cutcraft_core::printflat::unflatten(d, s)),
-            Divide => self.need(2, |d, s| ops::divide(d, s)),
+            Divide => self.need_shapes(2, |d, s| ops::divide(d, s)),
             UngroupLetters => self.split_text(true),
             UngroupLines => self.split_text(false),
             MakeCompound => self.need(2, |d, s| ops::make_compound(d, s)),
@@ -917,6 +937,25 @@ impl App {
         self.edit(|d, _| Some(f(d, &s)));
     }
 
+    /// Like [`Self::need`], for combining outlines (weld, subtract…):
+    /// pictures have no outline to combine, so they're left as they are.
+    fn need_shapes(&mut self, n: usize, f: impl FnOnce(&mut Document, &[ShapeId]) -> Vec<ShapeId>) {
+        let p = self.doc.page();
+        let (pictures, s): (Vec<ShapeId>, Vec<ShapeId>) = self.editable_sel().into_iter().partition(|id| p.shape(*id).is_some_and(|x| x.is_image()));
+        if s.len() < n {
+            self.status = if pictures.is_empty() {
+                format!("Select at least {n} unlocked shape(s)")
+            } else {
+                "Pictures can't be welded or combined with shapes - to cut a picture to a shape use Image ▸ Cut with a shape; to cut round a picture use Flatten (print then cut)".into()
+            };
+            return;
+        }
+        self.edit(|d, _| Some(f(d, &s).into_iter().chain(pictures.iter().copied()).collect()));
+        if !pictures.is_empty() {
+            self.status = "Combined the shapes; the picture(s) were left as they are".into();
+        }
+    }
+
     fn copy(&mut self) {
         let p = self.doc.page();
         self.clipboard = p.shapes.iter().filter(|s| self.sel.contains(&s.id)).cloned().collect();
@@ -960,6 +999,7 @@ impl App {
                 ui.separator();
                 item(ui, "Save", "Ctrl+S", Save);
                 item(ui, "Save As…", "Ctrl+Shift+S", SaveAs);
+                item(ui, "Print…", "Ctrl+P", Print);
                 ui.separator();
                 item(ui, "Export SVG…", "", ExportSvg);
                 item(ui, "Export SVG (cut lines only)…", "", ExportSvgCut);
@@ -1159,6 +1199,7 @@ impl App {
             (cs, Key::S, SaveAs),
             (c, Key::S, Save),
             (c, Key::Q, Quit),
+            (c, Key::P, Print),
             (cs, Key::Z, Redo),
             (c, Key::Z, Undo),
             (c, Key::Y, Redo),
@@ -1515,6 +1556,14 @@ impl eframe::App for App {
         }
         // keep the design to its locked sizes and distances
         crate::paramspanel::enforce(self);
+        // everything on a higher layer stacks above everything on a lower one
+        let mut restacked = false;
+        for p in &mut self.doc.pages {
+            restacked |= p.keep_layer_order();
+        }
+        if restacked {
+            self.rev += 1;
+        }
 
         // dropped files
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
@@ -1580,6 +1629,7 @@ impl eframe::App for App {
         self.dialogs(&ctx);
         self.recovery_dialog(&ctx);
         crate::wizards::upload_window(self, &ctx);
+        crate::print::window(self, &ctx);
         crate::wizards::tool_change_window(self, &ctx);
         crate::calibrate::window(self, &ctx);
         crate::eyedrop::tick(self, &ctx);

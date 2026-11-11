@@ -32,14 +32,18 @@ pub enum Protocol {
     /// Brother ScanNCut: no connection — the job is saved as an `.fcm` file
     /// for CanvasWorkspace (see `fcm.rs`).
     Fcm,
+    /// G-code streamed over a serial port to a GRBL controller (hobby CNC
+    /// drag knives, pen plotters, diode lasers). See `grbl.rs`.
+    Grbl,
 }
 
 impl Protocol {
-    pub const ALL: [(Protocol, &'static str); 4] = [
+    pub const ALL: [(Protocol, &'static str); 5] = [
         (Protocol::Gpgl, "GPGL (Silhouette / Graphtec)"),
         (Protocol::Hpgl, "HP-GL (GCC / Roland / vinyl cutters)"),
         (Protocol::Dmpl, "DMPL (Summa / Houston)"),
         (Protocol::Fcm, "Brother ScanNCut (.fcm file)"),
+        (Protocol::Grbl, "G-code to GRBL (serial port)"),
     ];
 }
 

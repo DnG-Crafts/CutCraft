@@ -59,6 +59,10 @@ pub struct Prefs {
     pub protocol: crate::gpgl::Protocol,
     /// Which GPGL command variant to emit.
     pub gpgl_dialect: crate::gpgl::GpglDialect,
+    /// The GRBL machine: port, how the tool goes down, feeds.
+    pub grbl: crate::grbl::GrblOptions,
+    /// The Cricut Maker 3 on cutcutgo: heights, feeds, where the page sits, limits.
+    pub maker3: crate::grbl::Maker3Options,
     /// Edit-bar anchor point (0..9, row-major from the top-left).
     pub anchor: usize,
     /// Line the dragged selection up with other shapes and the page.
@@ -97,6 +101,8 @@ impl Default for Prefs {
             custom_words: vec![],
             protocol: crate::gpgl::Protocol::default(),
             gpgl_dialect: crate::gpgl::GpglDialect::default(),
+            grbl: Default::default(),
+            maker3: Default::default(),
             anchor: 0,
             smart_guides: true,
             snap_objects: true,
@@ -135,5 +141,10 @@ impl Prefs {
         self.recent_files.retain(|x| x != p);
         self.recent_files.insert(0, p.into());
         self.recent_files.truncate(10);
+    }
+
+    /// Takes a design off the recent list (the file stays).
+    pub fn remove_recent(&mut self, p: &str) {
+        self.recent_files.retain(|x| x != p);
     }
 }

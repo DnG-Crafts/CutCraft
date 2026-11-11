@@ -5,7 +5,7 @@
 //! - DXF import (LINE, LWPOLYLINE, POLYLINE, CIRCLE, ARC, SPLINE control polygon) and export (R12).
 //! - PDF export for Print & Cut (vector, with registration marks).
 //! - PNG/JPEG/GIF/BMP/TIFF import as image shapes.
-//! - `.studio3` files are detected; their object stream is not decoded yet.
+//! - `.studio3` (Silhouette Studio 3+) outlines and pictures: see `studio3.rs`.
 
 use crate::doc::{Document, ImageData, Page, Rgba, Shape, ShapeKind, Style};
 use crate::geom::{self, Polyline};
@@ -95,6 +95,13 @@ pub fn import_with_notes(path: &Path, fontdb: Option<Arc<fontdb::Database>>) -> 
             if bytes.starts_with(b"%!") || bytes.starts_with(&[0xC5, 0xD0, 0xD3, 0xC6]) { crate::epsimport::import(&bytes) } else { crate::pdfimport::import(&bytes) }
         }
         FileKind::Eps => crate::epsimport::import(&std::fs::read(path)?),
+        FileKind::Studio3 => {
+            let bytes = std::fs::read(path)?;
+            if bytes.starts_with(b"silhouette05;") {
+                return crate::studio3::import(&bytes);
+            }
+            bail!("Unrecognised Silhouette file - save it from Silhouette Studio 3 or later, or export SVG/DXF")
+        }
         FileKind::Hpgl => Ok((crate::hpglimport::import(&std::fs::read(path)?)?, vec![])),
         FileKind::Fcm => crate::fcm::import(&std::fs::read(path)?),
         _ => Ok((import_plain(path, fontdb)?, vec![])),
@@ -106,15 +113,8 @@ fn import_plain(path: &Path, fontdb: Option<Arc<fontdb::Database>>) -> Result<Ve
         FileKind::Svg => import_svg(&std::fs::read(path)?, fontdb),
         FileKind::Dxf => import_dxf(&std::fs::read_to_string(path)?),
         FileKind::Image => Ok(vec![import_image(&std::fs::read(path)?)?]),
-        FileKind::Studio3 => {
-            let head = std::fs::read(path)?;
-            if head.starts_with(b"silhouette05;") {
-                bail!("This is a Silhouette Studio V3+ document. Its binary object stream is not supported yet - export it as SVG/DXF from Silhouette Studio and import that.");
-            }
-            bail!("Unrecognised Silhouette file")
-        }
         FileKind::Native => Ok(load_native(path)?.page().shapes.clone()),
-        FileKind::Pdf | FileKind::Eps | FileKind::Hpgl | FileKind::Fcm => unreachable!("handled by import_with_notes"),
+        FileKind::Pdf | FileKind::Eps | FileKind::Studio3 | FileKind::Hpgl | FileKind::Fcm => unreachable!("handled by import_with_notes"),
         FileKind::Unknown => bail!("Unsupported file type"),
     }
 }

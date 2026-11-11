@@ -14,10 +14,18 @@ pub enum Tool {
     EmbossTool,
     PunchTool,
     StippleTool,
+    // Cricut Maker 3 drive-housing tools (holder B)
+    KnifeBlade,
+    ScoringWheel,
+    DoubleScoringWheel,
+    PerforationBlade,
+    WavyBlade,
+    DebossingTip,
+    EngravingTip,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 9] = [
+    pub const ALL: [Tool; 16] = [
         Tool::AutoBlade,
         Tool::RatchetBlade,
         Tool::DeepCutBlade,
@@ -27,6 +35,13 @@ impl Tool {
         Tool::EmbossTool,
         Tool::PunchTool,
         Tool::StippleTool,
+        Tool::KnifeBlade,
+        Tool::ScoringWheel,
+        Tool::DoubleScoringWheel,
+        Tool::PerforationBlade,
+        Tool::WavyBlade,
+        Tool::DebossingTip,
+        Tool::EngravingTip,
     ];
     pub fn label(&self) -> &'static str {
         match self {
@@ -39,10 +54,22 @@ impl Tool {
             Tool::EmbossTool => "Emboss / score tool",
             Tool::PunchTool => "Punch tool",
             Tool::StippleTool => "Stipple / etching tool",
+            Tool::KnifeBlade => "Knife blade",
+            Tool::ScoringWheel => "Scoring wheel (01 single)",
+            Tool::DoubleScoringWheel => "Scoring wheel (02 double)",
+            Tool::PerforationBlade => "Perforation blade (11)",
+            Tool::WavyBlade => "Wavy blade (31)",
+            Tool::DebossingTip => "Fine debossing tip (21)",
+            Tool::EngravingTip => "Engraving tip (41)",
         }
     }
     pub fn is_blade(&self) -> bool {
-        matches!(self, Tool::AutoBlade | Tool::RatchetBlade | Tool::DeepCutBlade | Tool::KraftBlade | Tool::RotaryBlade)
+        matches!(self, Tool::AutoBlade | Tool::RatchetBlade | Tool::DeepCutBlade | Tool::KraftBlade | Tool::RotaryBlade | Tool::KnifeBlade | Tool::PerforationBlade | Tool::WavyBlade)
+    }
+
+    /// Tools only the Cricut Maker 3 (on cutcutgo) uses.
+    pub fn maker3_only(&self) -> bool {
+        matches!(self, Tool::KnifeBlade | Tool::ScoringWheel | Tool::DoubleScoringWheel | Tool::PerforationBlade | Tool::WavyBlade | Tool::DebossingTip | Tool::EngravingTip)
     }
     /// Swivel-blade tip offset in mm (0 for pens and rotary).
     pub fn blade_offset(&self) -> f64 {

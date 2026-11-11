@@ -9,6 +9,8 @@ mod chrome;
 mod editbar;
 mod eyedrop;
 mod gpu;
+mod grbl_ui;
+mod print;
 mod icon;
 mod icons;
 mod panels;

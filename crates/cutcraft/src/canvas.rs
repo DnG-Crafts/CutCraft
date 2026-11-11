@@ -962,8 +962,11 @@ fn draw_scene(app: &mut App, painter: &egui::Painter, ctx: &egui::Context, bg: C
             }
         }
     }
+    // the Image panel's adjustments, shown on their picture while it's open
+    let adjusted = app.ps.x.img_canvas.as_ref().filter(|(_, _, pass)| ctx.cumulative_pass_nr() <= pass + 2).map(|(key, tex, _)| (*key, tex.id()));
     for (slot, png, w, h, a) in images {
-        if let Some(tex) = texture_for(&mut app.textures, ctx, &png) {
+        let shown = adjusted.filter(|(key, _)| *key == std::sync::Arc::as_ptr(&png) as usize).map(|(_, t)| t);
+        if let Some(tex) = shown.or_else(|| texture_for(&mut app.textures, ctx, &png)) {
             let corners = [Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(w, h), Point::new(0.0, h)];
             let uvs = [Pos2::new(0.0, 0.0), Pos2::new(1.0, 0.0), Pos2::new(1.0, 1.0), Pos2::new(0.0, 1.0)];
             let mut mesh = egui::Mesh::with_texture(tex);
@@ -1599,155 +1602,127 @@ fn has_cutting_shape(app: &App, sel: &[ShapeId]) -> bool {
     sel.iter().any(|id| p.shape(*id).is_some_and(|s| !matches!(s.kind, ShapeKind::Image(_))))
 }
 
-/// Right-click menu on the canvas, with items appropriate to the selection.
+/// What a selected object is, for the right-click menu.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A plain shape: (closed, more than one piece, prints a fill).
+    Shape { closed: bool, compound: bool, prints: bool },
+    Text,
+    Picture,
+    /// A picture grouped with its cut line (Print & Cut).
+    PictureGroup,
+    /// A Flatten result: printed picture, cut line and the hidden originals.
+    Flattened,
+    Group,
+    Warp,
+}
+
+fn kind_of(s: &Shape) -> Kind {
+    match &s.kind {
+        _ if s.name == cutcraft_core::printflat::FLATTENED => Kind::Flattened,
+        ShapeKind::Group(ch) if ch.iter().any(|c| c.is_image()) => Kind::PictureGroup,
+        ShapeKind::Group(_) => Kind::Group,
+        ShapeKind::Text { .. } => Kind::Text,
+        ShapeKind::Image(_) => Kind::Picture,
+        ShapeKind::Warp(_) => Kind::Warp,
+        ShapeKind::Path(p) => {
+            let els = p.elements();
+            let pieces = els.iter().filter(|e| matches!(e, PathEl::MoveTo(_))).count();
+            let closed = els.iter().any(|e| matches!(e, PathEl::ClosePath));
+            Kind::Shape { closed, compound: pieces > 1, prints: s.style.fill.is_some() && !s.style.no_print }
+        }
+    }
+}
+
+/// A plain menu entry running `a`.
+fn entry(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context, label: &str, a: crate::app::Action) {
+    if ui.button(label).clicked() {
+        app.do_action(a, ctx);
+        ui.close();
+    }
+}
+
+/// A menu entry with a tooltip.
+fn entry_tip(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context, label: &str, tip: &str, a: crate::app::Action) {
+    if ui.button(label).on_hover_text(tip).clicked() {
+        app.do_action(a, ctx);
+        ui.close();
+    }
+}
+
+/// A menu entry switching to a tool.
+fn tool_entry(app: &mut App, ui: &mut egui::Ui, label: &str, tip: &str, t: Tool) {
+    if ui.button(label).on_hover_text(tip).clicked() {
+        app.tool = t;
+        ui.close();
+    }
+}
+
+/// Right-click menu on the canvas, built from what's selected: a picture gets
+/// picture tools, text gets text tools, a cut shape gets shape tools, and so on.
 fn selection_context_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     use crate::app::Action::*;
-    ui.set_min_width(170.0);
+    ui.set_min_width(190.0);
 
     let sel = app.sel.clone();
     let n = sel.len();
-    let (mut has_group, mut has_text, mut has_image, mut has_nonpath) = (false, false, false, false);
-    for id in &sel {
-        if let Some(s) = app.doc.page().shape(*id) {
-            match &s.kind {
-                ShapeKind::Group(_) => {
-                    has_group = true;
-                    has_nonpath = true;
-                }
-                ShapeKind::Text { .. } => {
-                    has_text = true;
-                    has_nonpath = true;
-                }
-                ShapeKind::Image(_) => {
-                    has_image = true;
-                    has_nonpath = true;
-                }
-                ShapeKind::Warp(_) => has_nonpath = true,
-                ShapeKind::Path(_) => {}
-            }
-        }
-    }
 
     // Nothing selected → canvas-level items.
     if n == 0 {
-        if ui.button("Paste").clicked() {
-            app.do_action(Paste, ctx);
-            ui.close();
-        }
-        if ui.button("Select all").clicked() {
-            app.do_action(SelectAll, ctx);
-            ui.close();
-        }
+        entry(app, ui, ctx, "Paste", Paste);
+        entry(app, ui, ctx, "Paste in place", PasteInPlace);
+        entry(app, ui, ctx, "Select all", SelectAll);
         ui.separator();
-        if ui.button("Add page").clicked() {
-            app.do_action(AddPage, ctx);
-            ui.close();
-        }
-        if ui.button("Page setup…").clicked() {
-            app.do_action(ShowPanel(Panel::Page), ctx);
-            ui.close();
-        }
+        entry(app, ui, ctx, "Add page", AddPage);
+        entry(app, ui, ctx, "Page setup…", ShowPanel(Panel::Page));
         return;
     }
 
-    if ui.button("Cut").clicked() {
-        app.do_action(Cut, ctx);
-        ui.close();
-    }
-    if ui.button("Copy").clicked() {
-        app.do_action(Copy, ctx);
-        ui.close();
-    }
-    if ui.button("Duplicate").clicked() {
-        app.do_action(Duplicate, ctx);
-        ui.close();
-    }
-    if ui.button("Delete").clicked() {
-        app.do_action(Delete, ctx);
-        ui.close();
-    }
+    let kinds: Vec<Kind> = sel.iter().filter_map(|id| app.doc.page().shape(*id)).map(kind_of).collect();
+    let all = |f: fn(&Kind) -> bool| !kinds.is_empty() && kinds.iter().all(f);
+    let any = |f: fn(&Kind) -> bool| kinds.iter().any(f);
+    let is_shape = |k: &Kind| matches!(k, Kind::Shape { .. });
+    let is_picture = |k: &Kind| matches!(k, Kind::Picture);
+    let has_picture = any(is_picture);
+    let has_picture_group = any(|k| matches!(k, Kind::PictureGroup));
+    let has_flattened = any(|k| matches!(k, Kind::Flattened));
+    let has_group = any(|k| matches!(k, Kind::Group | Kind::PictureGroup));
+    let has_text = any(|k| matches!(k, Kind::Text));
+    let has_warp = any(|k| matches!(k, Kind::Warp));
+    // something that prints, so Flatten has a picture to make
+    let prints = any(|k| matches!(k, Kind::Picture | Kind::PictureGroup | Kind::Shape { prints: true, .. }));
+    // shapes that can be combined: no pictures or flattened groups among them
+    let combinable = !any(|k| matches!(k, Kind::Picture | Kind::PictureGroup | Kind::Flattened));
+
+    // what's selected, as a heading
+    let title = if n == 1 {
+        let name = app.doc.page().shape(sel[0]).map(|s| s.display_name()).unwrap_or_default();
+        let what = match kinds.first() {
+            Some(Kind::Shape { closed: false, .. }) => "Open line",
+            Some(Kind::Shape { .. }) => "Shape",
+            Some(Kind::Text) => "Text",
+            Some(Kind::Picture) => "Picture",
+            Some(Kind::PictureGroup) => "Print & Cut picture",
+            Some(Kind::Flattened) => "Flattened picture",
+            Some(Kind::Group) => "Group",
+            Some(Kind::Warp) => "Warped shape",
+            None => "",
+        };
+        if name.is_empty() || name == what { what.to_string() } else { format!("{what}: {name}") }
+    } else {
+        format!("{n} objects")
+    };
+    ui.weak(title);
     ui.separator();
 
-    if n >= 2 {
-        if ui.button("Group").clicked() {
-            app.do_action(Group, ctx);
-            ui.close();
-        }
-        if ui.button("Fit into box").on_hover_text("Scale the rest into the largest selected shape").clicked() {
-            app.do_action(FitIntoBox, ctx);
-            ui.close();
-        }
-        ui.menu_button("Combine", |ui| {
-            if ui.button("Weld (union)").clicked() {
-                app.do_action(Weld, ctx);
-                ui.close();
-            }
-            if ui.button("Subtract").clicked() {
-                app.do_action(Subtract, ctx);
-                ui.close();
-            }
-            if ui.button("Intersect").clicked() {
-                app.do_action(Intersect, ctx);
-                ui.close();
-            }
-            if ui.button("Exclude").clicked() {
-                app.do_action(Exclude, ctx);
-                ui.close();
-            }
-            if ui.button("Unite (keep parts)").clicked() {
-                app.do_action(Unite, ctx);
-                ui.close();
-            }
-            if ui.button("Divide").clicked() {
-                app.do_action(Divide, ctx);
-                ui.close();
-            }
-        });
-    }
-    if has_group && ui.button("Ungroup").clicked() {
-        app.do_action(Ungroup, ctx);
-        ui.close();
-    }
-    ui.menu_button("Arrange", |ui| {
-        if ui.button("Bring to front").clicked() {
-            app.do_action(Arrange(ops::Arrange::Front), ctx);
-            ui.close();
-        }
-        if ui.button("Bring forward").clicked() {
-            app.do_action(Arrange(ops::Arrange::Forward), ctx);
-            ui.close();
-        }
-        if ui.button("Send backward").clicked() {
-            app.do_action(Arrange(ops::Arrange::Backward), ctx);
-            ui.close();
-        }
-        if ui.button("Send to back").clicked() {
-            app.do_action(Arrange(ops::Arrange::Back), ctx);
-            ui.close();
-        }
-    });
-    ui.menu_button("Transform", |ui| {
-        if ui.button("Flip horizontal").clicked() {
-            app.do_action(FlipH, ctx);
-            ui.close();
-        }
-        if ui.button("Flip vertical").clicked() {
-            app.do_action(FlipV, ctx);
-            ui.close();
-        }
-        if ui.button("Rotate 90°").clicked() {
-            app.do_action(Rotate(90.0), ctx);
-            ui.close();
-        }
-    });
+    entry(app, ui, ctx, "Cut", Cut);
+    entry(app, ui, ctx, "Copy", Copy);
+    entry(app, ui, ctx, "Duplicate", Duplicate);
+    entry(app, ui, ctx, "Delete", Delete);
     ui.separator();
 
-    // Type-specific shortcuts.
-    if has_image && ui.button("Trace to cut lines…").clicked() {
-        app.do_action(ShowPanel(Panel::Trace), ctx);
-        ui.close();
-    }
-    if has_image && has_cutting_shape(app, &sel) {
+    // ---- pictures
+    if has_picture && has_cutting_shape(app, &sel) && !all(is_picture) {
         if ui.button("Keep picture inside shape").on_hover_text("Removes the picture outside the selected shape").clicked() {
             crate::panels2::mask_with_shape(app, true);
             ui.close();
@@ -1756,44 +1731,120 @@ fn selection_context_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context)
             crate::panels2::mask_with_shape(app, false);
             ui.close();
         }
+        ui.separator();
     }
-    if has_image && ui.button("Image tools (adjust, photo → lines, shadow box)…").clicked() {
-        app.do_action(ShowPanel(Panel::Image), ctx);
-        ui.close();
+    if n == 1 && has_picture {
+        entry(app, ui, ctx, "Image tools (adjust, remove background…)…", ShowPanel(Panel::Image));
+        entry_tip(app, ui, ctx, "Trace to cut lines…", "Make cut lines from the picture", ShowPanel(Panel::Trace));
+        tool_entry(app, ui, "Erase part of the picture", "Rub out parts of the picture with the Image eraser", Tool::ImageEraser);
+        ui.separator();
     }
-    if has_text && ui.button("Edit text…").clicked() {
-        app.do_action(ShowPanel(Panel::Text), ctx);
-        ui.close();
+    if has_picture_group {
+        entry_tip(app, ui, ctx, "Ungroup to edit the picture", "Separates the picture from its cut line so you can adjust or cut it. The cut line stays set not to print.", Ungroup);
+        ui.separator();
     }
-    if ui.button("Flatten (print then cut)").clicked() {
-        app.do_action(Flatten, ctx);
-        ui.close();
+
+    // ---- flattened
+    if has_flattened {
+        entry_tip(app, ui, ctx, "Unflatten", "Brings back the original shapes, editable", Unflatten);
+        ui.separator();
     }
-    if sel.iter().any(|id| app.doc.page().shape(*id).is_some_and(|s| s.name == cutcraft_core::printflat::FLATTENED)) && ui.button("Unflatten").clicked() {
-        app.do_action(Unflatten, ctx);
-        ui.close();
+
+    // ---- text
+    if has_text {
+        entry(app, ui, ctx, "Edit text…", ShowPanel(Panel::Text));
+        entry(app, ui, ctx, "Ungroup to letters", UngroupLetters);
+        entry(app, ui, ctx, "Ungroup to lines", UngroupLines);
+        entry_tip(app, ui, ctx, "Convert to path", "Turns the text into ordinary shapes (no longer editable as text)", ConvertToPath);
+        ui.separator();
     }
-    if has_text && ui.button("Ungroup to letters").clicked() {
-        app.do_action(UngroupLetters, ctx);
-        ui.close();
+
+    // ---- shapes
+    if n == 1 && any(is_shape) {
+        tool_entry(app, ui, "Edit points", "Move, add or delete the shape's points (A)", Tool::Node);
+        entry_tip(app, ui, ctx, "Offset / outline…", "Grow or shrink the shape by a distance", ShowPanel(Panel::Modify));
+        if any(|k| matches!(k, Kind::Shape { compound: true, .. })) {
+            entry_tip(app, ui, ctx, "Release compound path", "Splits the shape into its separate pieces", ReleaseCompound);
+        }
+        ui.separator();
     }
-    if has_nonpath && ui.button("Convert to path").clicked() {
-        app.do_action(ConvertToPath, ctx);
-        ui.close();
+    if has_warp {
+        tool_entry(app, ui, "Edit warp", "Drag the warp's handles", Tool::Node);
+        entry(app, ui, ctx, "Convert to path", ConvertToPath);
+        ui.separator();
     }
-    if ui.button("Distort / live effects…").clicked() {
-        app.do_action(ShowPanel(Panel::Distort), ctx);
-        ui.close();
+
+    // ---- several objects
+    if n >= 2 {
+        entry(app, ui, ctx, "Group", Group);
+        if combinable {
+            ui.menu_button("Combine", |ui| {
+                entry_tip(app, ui, ctx, "Weld (union)", "Joins the shapes into one", Weld);
+                entry_tip(app, ui, ctx, "Subtract", "Cuts the top shape out of the one below", Subtract);
+                entry_tip(app, ui, ctx, "Subtract all", "Cuts every other shape out of the bottom one", SubtractAll);
+                entry_tip(app, ui, ctx, "Intersect", "Keeps only where the shapes overlap", Intersect);
+                entry_tip(app, ui, ctx, "Exclude", "Keeps only where they don't overlap", Exclude);
+                entry_tip(app, ui, ctx, "Unite (keep parts)", "One shape with every overlap kept as its own piece", Unite);
+                entry_tip(app, ui, ctx, "Divide", "Slices the shapes into every separate region", Divide);
+            });
+            if all(is_shape) {
+                entry_tip(app, ui, ctx, "Make compound path", "One shape with holes where they overlap", MakeCompound);
+            }
+        }
+        ui.menu_button("Align", |ui| {
+            entry(app, ui, ctx, "Left", Align(ops::AlignMode::Left));
+            entry(app, ui, ctx, "Centre", Align(ops::AlignMode::CenterH));
+            entry(app, ui, ctx, "Right", Align(ops::AlignMode::Right));
+            entry(app, ui, ctx, "Top", Align(ops::AlignMode::Top));
+            entry(app, ui, ctx, "Middle", Align(ops::AlignMode::Middle));
+            entry(app, ui, ctx, "Bottom", Align(ops::AlignMode::Bottom));
+            entry(app, ui, ctx, "Centre both", Align(ops::AlignMode::Center));
+            if n >= 3 {
+                ui.separator();
+                entry(app, ui, ctx, "Distribute horizontally", DistributeH);
+                entry(app, ui, ctx, "Distribute vertically", DistributeV);
+            }
+        });
+        entry_tip(app, ui, ctx, "Fit into box", "Scale the rest into the largest selected shape", FitIntoBox);
+        ui.separator();
     }
-    if ui.button("Fill sheet with copies…").clicked() {
-        app.do_action(ShowPanel(Panel::Replicate), ctx);
-        ui.close();
+    if has_group && !has_picture_group {
+        entry(app, ui, ctx, "Ungroup", Ungroup);
     }
+
+    ui.menu_button("Arrange", |ui| {
+        entry(app, ui, ctx, "Bring to front", Arrange(ops::Arrange::Front));
+        entry(app, ui, ctx, "Bring forward", Arrange(ops::Arrange::Forward));
+        entry(app, ui, ctx, "Send backward", Arrange(ops::Arrange::Backward));
+        entry(app, ui, ctx, "Send to back", Arrange(ops::Arrange::Back));
+    });
+    ui.menu_button("Transform", |ui| {
+        entry(app, ui, ctx, "Flip horizontal", FlipH);
+        entry(app, ui, ctx, "Flip vertical", FlipV);
+        entry(app, ui, ctx, "Rotate 90° right", Rotate(90.0));
+        entry(app, ui, ctx, "Rotate 90° left", Rotate(-90.0));
+        entry(app, ui, ctx, "Rotate 180°", Rotate(180.0));
+    });
     ui.separator();
-    if ui.button("Deselect").clicked() {
-        app.do_action(Deselect, ctx);
-        ui.close();
+
+    // ---- effects, for what they make sense on
+    if prints && !has_flattened {
+        entry_tip(app, ui, ctx, "Flatten (print then cut)", "Turns what's selected into one printed picture with a cut line round it", Flatten);
     }
+    if !any(|k| matches!(k, Kind::Picture | Kind::PictureGroup | Kind::Flattened)) {
+        ui.menu_button("Effects", |ui| {
+            entry(app, ui, ctx, "Distort / live effects…", ShowPanel(Panel::Distort));
+            entry(app, ui, ctx, "Warp…", ShowPanel(Panel::Warp));
+            entry(app, ui, ctx, "Path tools (hull, lattice, knockout…)…", ShowPanel(Panel::PathTools));
+            entry(app, ui, ctx, "Stipple, emboss & pop-up…", ShowPanel(Panel::Effects));
+        });
+        if any(|k| matches!(k, Kind::Group)) {
+            entry(app, ui, ctx, "Convert to path", ConvertToPath);
+        }
+    }
+    entry(app, ui, ctx, "Fill sheet with copies…", ShowPanel(Panel::Replicate));
+    ui.separator();
+    entry(app, ui, ctx, "Deselect", Deselect);
 }
 
 // ------------------------------------------------------------------ interaction

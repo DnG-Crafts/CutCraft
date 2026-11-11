@@ -758,6 +758,99 @@ pub fn recolour_outline(s: &mut Shape, from: Option<crate::doc::Rgba>, to: crate
     }
 }
 
+/// Moves `ids` (keeping their order) to just above `target` in the stack
+/// (`above`: drawn over it) or just below it.
+pub fn move_in_stack(doc: &mut Document, ids: &[ShapeId], target: ShapeId, above: bool) {
+    if ids.contains(&target) {
+        return;
+    }
+    let page = doc.page_mut();
+    let moving: Vec<Shape> = page.shapes.iter().filter(|s| ids.contains(&s.id)).cloned().collect();
+    if moving.is_empty() {
+        return;
+    }
+    page.shapes.retain(|s| !ids.contains(&s.id));
+    let Some(t) = page.shapes.iter().position(|s| s.id == target) else {
+        page.shapes.extend(moving);
+        return;
+    };
+    let at = if above { t + 1 } else { t };
+    for (k, s) in moving.into_iter().enumerate() {
+        page.shapes.insert(at + k, s);
+    }
+}
+
+/// Moves shapes to another layer. Shapes still drawn in their old layer's
+/// colour take the new layer's colour.
+pub fn move_to_layer(doc: &mut Document, ids: &[ShapeId], layer: u32) {
+    let page = doc.page_mut();
+    let colour = |p: &crate::doc::Page, id: u32| p.layer(id).map(|l| l.color);
+    let to = colour(page, layer);
+    for id in ids {
+        let from = page.shape(*id).and_then(|sh| colour(page, sh.layer));
+        if let Some(sh) = page.shape_mut(*id) {
+            sh.layer = layer;
+            if let (Some(from), Some(to)) = (from, to) {
+                recolour_outline(sh, Some(from), to);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    fn order(doc: &Document) -> Vec<ShapeId> {
+        doc.page().shapes.iter().map(|s| s.id).collect()
+    }
+
+    #[test]
+    fn moving_in_the_stack_and_between_layers() {
+        let mut doc = Document::default();
+        let ids: Vec<ShapeId> = (0..4).map(|i| doc.add_path(geom::rect_path(Rect::new(i as f64, 0.0, i as f64 + 5.0, 5.0)), Style::default(), 0)).collect();
+        let (a, b, c, d) = (ids[0], ids[1], ids[2], ids[3]);
+        // a over c (drawn after it)
+        move_in_stack(&mut doc, &[a], c, true);
+        assert_eq!(order(&doc), vec![b, c, a, d]);
+        // b and d, in that order, under c
+        move_in_stack(&mut doc, &[b, d], c, false);
+        assert_eq!(order(&doc), vec![b, d, c, a]);
+        // onto itself: nothing
+        move_in_stack(&mut doc, &[c], c, true);
+        assert_eq!(order(&doc), vec![b, d, c, a]);
+        // to another layer, taking its colour when it had the old layer's
+        let page = doc.page_mut();
+        page.layers.push(crate::doc::Layer { id: 1, name: "Layer 2".into(), visible: true, locked: false, color: crate::doc::Rgba(0, 200, 0, 255) });
+        let old = page.layers[0].color;
+        page.shape_mut(a).unwrap().style.stroke = Some(old);
+        move_to_layer(&mut doc, &[a], 1);
+        let s = doc.page().shape(a).unwrap();
+        assert_eq!((s.layer, s.style.stroke), (1, Some(crate::doc::Rgba(0, 200, 0, 255))));
+    }
+
+    #[test]
+    fn higher_layers_stack_above_lower_ones() {
+        let mut doc = Document::default();
+        doc.page_mut().layers.push(crate::doc::Layer { id: 1, name: "Layer 2".into(), visible: true, locked: false, color: crate::doc::Rgba(0, 200, 0, 255) });
+        let r = || geom::rect_path(Rect::new(0.0, 0.0, 5.0, 5.0));
+        let a = doc.add_path(r(), Style::default(), 0);
+        let b = doc.add_path(r(), Style::default(), 1);
+        let c = doc.add_path(r(), Style::default(), 0);
+        // c was added last, but it's on the lower layer: it goes under b
+        assert!(doc.page_mut().keep_layer_order());
+        assert_eq!(order(&doc), vec![a, c, b]);
+        assert!(!doc.page_mut().keep_layer_order(), "already in order");
+        // Layer 2 to the bottom: its b goes under everything
+        doc.page_mut().move_layer(1, 0);
+        assert_eq!(order(&doc), vec![b, a, c]);
+        // a moved onto Layer 2 joins the top of it
+        move_to_layer(&mut doc, &[a], 1);
+        doc.page_mut().keep_layer_order();
+        assert_eq!(order(&doc), vec![b, a, c]);
+    }
+}
+
 /// Masks the selected pictures with the selected shapes: keeps only the
 /// part of each picture inside the shapes (`keep_inside`, trimming the
 /// picture to them), or cuts the shapes out of it. The shapes stay (a ready
@@ -766,11 +859,27 @@ pub fn image_mask(doc: &mut Document, sel: &[ShapeId], keep_inside: bool, remove
     let page = doc.page();
     let is_image = |id: &ShapeId| page.shape(*id).is_some_and(|s| matches!(s.kind, ShapeKind::Image(_)));
     let images: Vec<ShapeId> = z_ordered(doc, sel).into_iter().filter(is_image).collect();
-    let cutters: Vec<ShapeId> = z_ordered(doc, sel).into_iter().filter(|id| !is_image(id)).collect();
-    if images.is_empty() || cutters.is_empty() {
+    let mut cutters: Vec<ShapeId> = z_ordered(doc, sel).into_iter().filter(|id| !is_image(id)).collect();
+    // a cut line set not to print (Flatten's, or a Print & Cut upload's) is
+    // the picture's own outline: with another shape selected, it's not one to use
+    let prints = |id: &ShapeId| page.shape(*id).is_some_and(|s| s.leaves().iter().any(|l| !l.style.no_print));
+    if cutters.iter().any(prints) {
+        cutters.retain(prints);
+    }
+    if images.is_empty() {
+        let grouped = sel.iter().any(|id| page.shape(*id).is_some_and(|s| matches!(&s.kind, ShapeKind::Group(ch) if ch.iter().any(|c| c.is_image()))));
+        return Err(if grouped {
+            "the picture is grouped with its cut line (Print & Cut) - ungroup it first (Image panel ▸ Ungroup to edit the picture)".into()
+        } else {
+            "select a picture and the shape(s) to use on it".into()
+        });
+    }
+    if cutters.is_empty() {
         return Err("select a picture and the shape(s) to use on it".into());
     }
-    let shape: Vec<BezPath> = cutters.iter().flat_map(|id| world(doc, *id)).collect();
+    // the area any of them covers (each shape's own holes kept)
+    let each: Vec<BezPath> = cutters.iter().map(|id| geom::merge_paths(&world(doc, *id))).collect();
+    let shape: Vec<BezPath> = vec![geom::union_each(&each)];
     if geom::flatten_all(&shape, 0.1).iter().all(|p| !p.closed) {
         return Err("the shape needs to be closed (a line can't cut a picture)".into());
     }
@@ -868,6 +977,39 @@ mod image_mask_tests {
         // the shape stays as a cut line; the Restore brush has the original
         assert!(doc.page().shape(c).is_some());
         assert!(d.original.is_some());
+    }
+
+    #[test]
+    fn a_pictures_own_cut_line_selected_too_doesnt_turn_it_inside_out() {
+        // after Flatten then Ungroup: the picture, its cut line (not printed) round it, and a shape drawn on top
+        for keep in [true, false] {
+            let (mut doc, p, c) = setup();
+            let outline = Style { stroke: Some(crate::doc::Rgba(40, 40, 40, 255)), no_print: true, ..Style::default() };
+            let line = doc.add_path(geom::rect_path(Rect::new(11.0, 11.0, 29.0, 29.0)), outline, 0);
+            image_mask(&mut doc, &[p, line, c], keep, false).unwrap();
+            if keep {
+                // only the circle's part is kept
+                let s = doc.page().shape(p).unwrap();
+                let ShapeKind::Image(d) = &s.kind else { panic!() };
+                assert!(d.px_w <= 11, "trimmed to the circle, not the cut line: {}", d.px_w);
+                let mid = d.px_w / 2;
+                assert_eq!(alpha(&doc, p, mid, mid), 255);
+            } else {
+                // the circle's hole, the rest kept
+                assert_eq!(alpha(&doc, p, 10, 10), 0, "a hole where the circle is");
+                assert_eq!(alpha(&doc, p, 2, 2), 255);
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_shapes_cut_as_one() {
+        // two overlapping circles: their overlap is kept too (not cancelled out)
+        let (mut doc, p, c) = setup();
+        let c2 = doc.add_path(geom::circle_path(Point::new(23.0, 20.0), 5.0), Style::default(), 0);
+        image_mask(&mut doc, &[p, c, c2], false, false).unwrap();
+        // the overlap, round (21.5, 20), is cut out like the rest
+        assert_eq!(alpha(&doc, p, 11, 10), 0);
     }
 
     #[test]

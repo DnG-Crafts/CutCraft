@@ -7,7 +7,7 @@ use crate::app::App;
 use crate::chrome::ACCENT;
 use cutcraft_core::doc::{Shape, ShapeKind, Style};
 use cutcraft_core::kurbo::{Affine, BezPath, Point};
-use cutcraft_core::trace::{self, TraceMode, TraceParams};
+use cutcraft_core::trace;
 use cutcraft_core::{geom, io, raster};
 use egui::{Color32, RichText, Stroke};
 use std::path::PathBuf;
@@ -80,16 +80,12 @@ impl UploadWizard {
         self.outline = BezPath::new();
         if let Ok(img) = image::load_from_memory(&png) {
             let img = img.to_rgba8();
-            // trace what's left: opaque pixels black on white
-            let mut mask = image::RgbaImage::from_pixel(img.width(), img.height(), image::Rgba([255, 255, 255, 255]));
-            for (x, y, p) in img.enumerate_pixels() {
-                if p.0[3] > 127 {
-                    mask.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
-                }
+            // trace what's left; with nothing see-through, the cut is the picture's edge
+            match trace::visible_outline(&img) {
+                Some(px) => self.outline = Affine::scale_non_uniform(w / img.width().max(1) as f64, h / img.height().max(1) as f64) * px,
+                None if img.pixels().any(|p| p.0[3] > 127) => self.outline = geom::rect_path(cutcraft_core::kurbo::Rect::new(0.0, 0.0, w, h)),
+                None => {}
             }
-            let params = TraceParams { mode: TraceMode::Threshold, threshold: 128, despeckle: 64, outer_only: true, tolerance: 1.0, smooth: true, ..TraceParams::default() };
-            let px = trace::trace(&mask, &params);
-            self.outline = Affine::scale_non_uniform(w / img.width().max(1) as f64, h / img.height().max(1) as f64) * px;
         }
         self.png = png;
         self.tex = None;
@@ -287,12 +283,14 @@ fn load_project(path: PathBuf) -> Project {
 pub struct Home {
     pub projects: Vec<Project>,
     pub folder: Option<PathBuf>,
+    /// What happened last (a design moved to the Recycle Bin, or why not).
+    pub note: String,
 }
 
 impl Home {
     pub fn new(app: &App) -> Self {
         let projects = app.prefs.recent_files.iter().map(PathBuf::from).filter(|p| p.exists()).map(load_project).collect();
-        Home { projects, folder: None }
+        Home { projects, folder: None, note: String::new() }
     }
 }
 
@@ -330,9 +328,16 @@ pub fn home_screen(app: &mut App, ui: &mut egui::Ui) -> bool {
             None => "Recent designs".into(),
         }).strong());
         ui.add_space(6.0);
+        if !home.note.is_empty() {
+            ui.weak(&home.note);
+            ui.add_space(4.0);
+        }
         if home.projects.is_empty() {
             ui.weak("Nothing here yet - start a new design, or open one.");
         }
+        let recent = home.folder.is_none();
+        let mut forget: Option<PathBuf> = None;
+        let mut bin: Option<PathBuf> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(14.0, 14.0);
@@ -358,12 +363,55 @@ pub fn home_screen(app: &mut App, ui: &mut egui::Ui) -> bool {
                     }
                     ui.painter().text(rect.left_bottom() + egui::vec2(12.0, -30.0), egui::Align2::LEFT_BOTTOM, &p.name, egui::FontId::proportional(14.0), v.strong_text_color());
                     ui.painter().text(rect.left_bottom() + egui::vec2(12.0, -12.0), egui::Align2::LEFT_BOTTOM, &p.modified, egui::FontId::proportional(11.0), v.weak_text_color());
-                    if resp.on_hover_text(p.path.display().to_string()).clicked() {
+                    // × in the corner while the card is hovered: off the recent list
+                    if recent && ui.rect_contains_pointer(rect) {
+                        let x = egui::Rect::from_center_size(rect.right_top() + egui::vec2(-16.0, 16.0), egui::vec2(22.0, 22.0));
+                        let b = ui.put(x, egui::Button::new("✕").small().corner_radius(egui::CornerRadius::same(11)));
+                        if b.on_hover_text("Remove from recent designs (the file stays)").clicked() {
+                            forget = Some(p.path.clone());
+                        }
+                    }
+                    let resp = resp.on_hover_text(format!("{}\nRight-click for more", p.path.display()));
+                    if resp.clicked() && forget.is_none() {
                         open = Some(p.path.clone());
                     }
+                    resp.context_menu(|ui| {
+                        if ui.button("Open").clicked() {
+                            open = Some(p.path.clone());
+                            ui.close();
+                        }
+                        if recent && ui.button("Remove from recent designs").on_hover_text("The file stays where it is").clicked() {
+                            forget = Some(p.path.clone());
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Move file to Recycle Bin…").on_hover_text("Deletes the design file - you can get it back from the Recycle Bin (Trash)").clicked() {
+                            bin = Some(p.path.clone());
+                            ui.close();
+                        }
+                    });
                 }
             });
         });
+        if let Some(p) = forget {
+            app.prefs.remove_recent(&p.to_string_lossy());
+            let _ = app.prefs.save();
+            home.projects.retain(|q| q.path != p);
+        }
+        if let Some(p) = bin {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if crate::app::confirm(&format!("Move \"{name}\" to the Recycle Bin?\n\n{}", p.display())) {
+                match trash::delete(&p) {
+                    Ok(()) => {
+                        app.prefs.remove_recent(&p.to_string_lossy());
+                        let _ = app.prefs.save();
+                        home.projects.retain(|q| q.path != p);
+                        home.note = format!("Moved {name} to the Recycle Bin");
+                    }
+                    Err(e) => home.note = format!("Couldn't move {name} to the Recycle Bin: {e}"),
+                }
+            }
+        }
     });
     if let Some(p) = open {
         app.open_path(p);
@@ -396,7 +444,8 @@ pub fn tool_change_window(app: &mut App, ctx: &egui::Context) {
         }
         lines.push("Don't unload the mat - the next part cuts in the same place.".to_string());
         lines.push(format!("{} part{} left.", app.tool_queue.len(), if app.tool_queue.len() == 1 { "" } else { "s" }));
-        match crate::dialogs::prompt(ui, &format!("Load the {} in carriage {slot}", tool.label()), &lines, &[Choice::main("Continue"), Choice::other("Stop here")]) {
+        let place = if cutcraft_core::grbl::is_maker3(&app.doc.machine) { format!("holder {}", if slot == 1 { "A" } else { "B" }) } else { format!("carriage {slot}") };
+        match crate::dialogs::prompt(ui, &format!("Load the {} in {place}", tool.label()), &lines, &[Choice::main("Continue"), Choice::other("Stop here")]) {
             Some(0) => go = true,
             Some(_) => stop = true,
             None => {}

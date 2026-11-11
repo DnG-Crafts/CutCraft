@@ -524,6 +524,150 @@ impl Adjustments {
     }
 }
 
+/// The plain backdrop joined to a picture's edges: a see-through amount per
+/// pixel (1 = backdrop, 0 = keep), for colours within `tolerance` (0..1) of
+/// the backdrop's colour (the edge's middle colour), with a soft rim.
+/// Pixels that are already see-through count as backdrop too.
+fn backdrop(img: &image::RgbaImage, tolerance: f32) -> Vec<f32> {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let mut out = vec![0.0f32; w * h];
+    if w == 0 || h == 0 {
+        return out;
+    }
+    let px = |i: usize| img.as_raw()[i * 4..i * 4 + 4].to_vec();
+    let border: Vec<usize> = (0..w).flat_map(|x| [x, (h - 1) * w + x]).chain((0..h).flat_map(|y| [y * w, y * w + w - 1])).collect();
+    // the backdrop colour: each channel's middle value round the edge
+    let mid = |c: usize| {
+        let mut v: Vec<u8> = border.iter().map(|&i| px(i)[c]).collect();
+        v.sort_unstable();
+        v[v.len() / 2] as f32
+    };
+    let bg = [mid(0), mid(1), mid(2)];
+    let distance = |i: usize| {
+        let p = px(i);
+        if p[3] < 16 {
+            return 0.0;
+        }
+        (0..3).map(|c| (p[c] as f32 - bg[c]).abs() / 255.0).fold(0.0f32, f32::max)
+    };
+    let tol = tolerance.clamp(0.0, 1.0);
+    let mut seen = vec![false; w * h];
+    let mut stack: Vec<usize> = border.into_iter().filter(|&i| distance(i) <= tol).collect();
+    while let Some(i) = stack.pop() {
+        if seen[i] {
+            continue;
+        }
+        seen[i] = true;
+        out[i] = 1.0;
+        let (x, y) = (i % w, i / w);
+        let near = [(x > 0).then(|| i - 1), (x + 1 < w).then(|| i + 1), (y > 0).then(|| i - w), (y + 1 < h).then(|| i + w)];
+        for j in near.into_iter().flatten() {
+            if !seen[j] && distance(j) <= tol {
+                stack.push(j);
+            }
+        }
+    }
+    // a soft rim: kept pixels touching the backdrop fade a little by how close they are to it
+    let soft = (tol * 0.5).max(0.02);
+    let edge: Vec<usize> = (0..w * h)
+        .filter(|&i| out[i] == 0.0)
+        .filter(|&i| {
+            let (x, y) = (i % w, i / w);
+            (x > 0 && out[i - 1] == 1.0) || (x + 1 < w && out[i + 1] == 1.0) || (y > 0 && out[i - w] == 1.0) || (y + 1 < h && out[i + w] == 1.0)
+        })
+        .collect();
+    for i in edge {
+        out[i] = (1.0 - (distance(i) - tol) / soft).clamp(0.0, 1.0) * 0.8;
+    }
+    out
+}
+
+/// The picture with a plain white (or near-white) backdrop joined to its
+/// edges made see-through - None when the backdrop isn't white (a photo, a
+/// coloured background), so nothing is guessed. White inside the design,
+/// not joined to the edge, stays.
+pub fn without_white_backdrop(img: &image::RgbaImage) -> Option<image::RgbaImage> {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if w < 3 || h < 3 {
+        return None;
+    }
+    let edge = (0..w).flat_map(|x| [(x, 0), (x, h - 1)]).chain((0..h).flat_map(|y| [(0, y), (w - 1, y)]));
+    let mut light = 0usize;
+    let mut total = 0usize;
+    for (x, y) in edge {
+        let p = img.get_pixel(x as u32, y as u32).0;
+        total += 1;
+        if p[3] > 127 && p[0] > 235 && p[1] > 235 && p[2] > 235 {
+            light += 1;
+        }
+    }
+    // most of the edge is white
+    if light * 10 < total * 7 {
+        return None;
+    }
+    let bg = backdrop(img, 0.06);
+    let mut out = img.clone();
+    for (p, t) in out.pixels_mut().zip(bg) {
+        p.0[3] = (p.0[3] as f32 * (1.0 - t)).round() as u8;
+    }
+    Some(out)
+}
+
+/// A picture with `a` applied, in colour: brightness, contrast, gamma,
+/// sharpen, auto levels and invert work on the colours; Remove background
+/// makes the plain backdrop see-through; the Sketch, Line art and Edges
+/// effects give a black and white picture. What's see-through stays so.
+pub fn adjust_rgba(img: &image::RgbaImage, a: &Adjustments) -> image::RgbaImage {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let mut out = img.clone();
+    if w == 0 || h == 0 {
+        return out;
+    }
+    let see_through = if a.remove_background > 0.0 { Some(backdrop(img, a.remove_background)) } else { None };
+    let tones = Adjustments { remove_background: 0.0, ..*a };
+    if a.effect != Effect::None {
+        // black and white effects: on the grey picture
+        let mut g = Gray::from_dynamic(&image::DynamicImage::ImageRgba8(img.clone()));
+        g.adjust(&tones);
+        for (i, p) in out.pixels_mut().enumerate() {
+            let v = (g.data[i].clamp(0.0, 1.0) * 255.0).round() as u8;
+            p.0 = [v, v, v, p.0[3]];
+        }
+    } else if !tones.is_neutral() {
+        // each colour channel as a grey picture, so sharpen and the tone curve apply to all three
+        let channel = |c: usize| Gray { width: w, height: h, data: img.pixels().map(|p| p.0[c] as f32 / 255.0).collect() };
+        let mut chans = [channel(0), channel(1), channel(2)];
+        if tones.auto_level {
+            // one stretch for all three, from the brightness, so colours don't shift
+            let mut luma: Vec<f32> = img.pixels().map(|p| (0.2126 * p.0[0] as f32 + 0.7152 * p.0[1] as f32 + 0.0722 * p.0[2] as f32) / 255.0).collect();
+            luma.sort_by(f32::total_cmp);
+            let (lo, hi) = (luma[luma.len() / 100], luma[(luma.len() * 99 / 100).min(luma.len() - 1)]);
+            if hi - lo > 1e-3 {
+                for ch in &mut chans {
+                    for v in &mut ch.data {
+                        *v = ((*v - lo) / (hi - lo)).clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
+        let per_channel = Adjustments { auto_level: false, ..tones };
+        for ch in &mut chans {
+            ch.adjust(&per_channel);
+        }
+        for (i, p) in out.pixels_mut().enumerate() {
+            for c in 0..3 {
+                p.0[c] = (chans[c].data[i].clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+    }
+    if let Some(bg) = see_through {
+        for (p, t) in out.pixels_mut().zip(bg) {
+            p.0[3] = (p.0[3] as f32 * (1.0 - t)).round() as u8;
+        }
+    }
+    out
+}
+
 /// Artistic effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Effect {
@@ -746,6 +890,32 @@ pub fn shadow_box_plates(gray: &Gray, w_mm: f64, h_mm: f64, plates: usize, borde
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn colour_adjustments_and_background_removal() {
+        use super::{Adjustments, Effect, adjust_rgba};
+        // a red box on white
+        let mut img = image::RgbaImage::from_pixel(40, 30, image::Rgba([255, 255, 255, 255]));
+        for y in 10..20 {
+            for x in 10..30 {
+                img.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+            }
+        }
+        // remove background: the white goes see-through, the red stays red
+        let out = adjust_rgba(&img, &Adjustments { remove_background: 0.1, ..Default::default() });
+        assert_eq!(out.get_pixel(0, 0).0[3], 0, "the backdrop is see-through");
+        assert_eq!(out.get_pixel(20, 15).0, [255, 0, 0, 255], "the box stays");
+        // brightness keeps the colour: red gets lighter, not grey
+        let out = adjust_rgba(&img, &Adjustments { brightness: 0.2, ..Default::default() });
+        let p = out.get_pixel(20, 15).0;
+        assert!(p[0] == 255 && p[1] > 30 && p[1] == p[2], "{p:?}");
+        // an effect is black and white
+        let out = adjust_rgba(&img, &Adjustments { effect: Effect::Sketch, ..Default::default() });
+        let p = out.get_pixel(20, 15).0;
+        assert!(p[0] == p[1] && p[1] == p[2]);
+        // nothing to do: unchanged
+        assert_eq!(adjust_rgba(&img, &Adjustments::default()), img);
+    }
+
     #[test]
     fn select_erase_restore_and_crop() {
         // left half red, right half blue, 20 x 10 px, as 20 x 10 mm

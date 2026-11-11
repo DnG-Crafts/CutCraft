@@ -102,6 +102,43 @@ pub fn render(shapes: &[Shape], area: Rect) -> image::RgbaImage {
     img
 }
 
+/// The page as it prints, `dpi` dots per inch, on white: what the Print &
+/// Cut PDF has - pictures, filled shapes and the registration marks (lines
+/// that are only cut, and anything set not to print, are left out). The
+/// resolution is lowered for very large pages so it stays under ~20,000 px
+/// a side; the returned dpi is what was used.
+pub fn render_print(page: &crate::doc::Page, dpi: f64) -> (image::RgbaImage, f64) {
+    let area = page.rect();
+    let longest = page.width.max(page.height) / 25.4;
+    let dpi = dpi.min(20_000.0 / longest.max(1e-9)).max(10.0);
+    let k = dpi / 25.4;
+    let (w, h) = ((page.width * k).ceil().max(1.0) as usize, (page.height * k).ceil().max(1.0) as usize);
+    let mut img = image::RgbaImage::from_pixel(w as u32, h as u32, image::Rgba([255, 255, 255, 255]));
+    const SS: usize = 2;
+    for s in page.shapes.iter().filter(|s| page.is_visible(s)) {
+        for leaf in s.leaves() {
+            if leaf.hidden || leaf.style.no_print {
+                continue;
+            }
+            match &leaf.kind {
+                ShapeKind::Image(d) => draw_image(&mut img, area, &leaf, d),
+                _ => {
+                    if let Some(c) = leaf.style.fill {
+                        let cov = coverage(&leaf.world_paths(), area, w, h, SS);
+                        paint(&mut img, &cov, (SS * SS) as u16, [c.0, c.1, c.2, c.3]);
+                    }
+                }
+            }
+        }
+    }
+    let marks = page.regmarks.print_geometry(page.width, page.height);
+    if !marks.is_empty() {
+        let cov = coverage(&marks, area, w, h, SS);
+        paint(&mut img, &cov, (SS * SS) as u16, [0, 0, 0, 255]);
+    }
+    (img, dpi)
+}
+
 /// Nearest-pixel draw of a picture leaf into `img` (covering `area`).
 fn draw_image(img: &mut image::RgbaImage, area: Rect, leaf: &Shape, d: &ImageData) {
     let Ok(src) = image::load_from_memory(&d.png) else { return };
@@ -109,8 +146,19 @@ fn draw_image(img: &mut image::RgbaImage, area: Rect, leaf: &Shape, d: &ImageDat
     let inv = leaf.transform.inverse();
     let (w, h) = (img.width(), img.height());
     let (px_w, px_h) = (area.width() / w as f64, area.height() / h as f64);
-    for y in 0..h {
-        for x in 0..w {
+    // only the pixels the picture covers
+    let corners = [(0.0, 0.0), (d.width_mm, 0.0), (d.width_mm, d.height_mm), (0.0, d.height_mm)].map(|c| leaf.transform * Point::from(c));
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for c in corners {
+        (x0, y0, x1, y1) = (x0.min(c.x), y0.min(c.y), x1.max(c.x), y1.max(c.y));
+    }
+    // mm from the area's edge → a pixel column or row, kept on the image
+    let first = |mm: f64, size: f64, n: u32| ((mm / size).floor().max(0.0) as u32).min(n);
+    let last = |mm: f64, size: f64, n: u32| ((mm / size).ceil().max(0.0) as u32).min(n);
+    let (cx0, cx1) = (first(x0 - area.x0, px_w, w), last(x1 - area.x0, px_w, w));
+    let (cy0, cy1) = (first(y0 - area.y0, px_h, h), last(y1 - area.y0, px_h, h));
+    for y in cy0..cy1 {
+        for x in cx0..cx1 {
             let p = inv * Point::new(area.x0 + (x as f64 + 0.5) * px_w, area.y0 + (y as f64 + 0.5) * px_h);
             if p.x < 0.0 || p.y < 0.0 || p.x >= d.width_mm || p.y >= d.height_mm {
                 continue;
@@ -149,6 +197,25 @@ fn image_shape(doc: &mut Document, img: &image::RgbaImage, area: Rect, layer: u3
 /// The name a flattened group carries (Unflatten looks for it).
 pub const FLATTENED: &str = "Flattened";
 
+/// A shape's outline for the cut line: for a picture with see-through
+/// parts (its background removed, or a shape cut out of it), the outline of
+/// what's visible rather than its rectangular frame.
+fn outline_of(leaf: &Shape) -> Vec<BezPath> {
+    if let ShapeKind::Image(d) = &leaf.kind {
+        if let Ok(img) = image::load_from_memory(&d.png) {
+            let img = img.to_rgba8();
+            // a plain white background is blank paper: cut round what's on it
+            // (unless that leaves nothing - an all-white picture)
+            let cleaned = crate::raster::without_white_backdrop(&img).and_then(|c| crate::trace::visible_outline(&c));
+            if let Some(px) = cleaned.or_else(|| crate::trace::visible_outline(&img)) {
+                let to_mm = kurbo::Affine::scale_non_uniform(d.width_mm / img.width().max(1) as f64, d.height_mm / img.height().max(1) as f64);
+                return vec![leaf.transform * (to_mm * px)];
+            }
+        }
+    }
+    leaf.world_paths()
+}
+
 /// Flatten: the selection becomes one printed picture plus one cut line round
 /// its outer edge, grouped. The original shapes are kept, hidden, inside the
 /// group so [`unflatten`] can bring them back.
@@ -161,13 +228,15 @@ pub fn flatten(doc: &mut Document, sel: &[ShapeId]) -> Sel {
     let Some(bb) = shapes.iter().filter_map(|s| s.bbox()).reduce(|a, b| a.union(b)) else { return vec![] };
     let area = bb.inflate(0.5, 0.5);
     let img = render(&shapes, area);
-    let all: Vec<BezPath> = shapes.iter().flat_map(|s| s.leaves()).filter(|l| !l.hidden).flat_map(|l| l.world_paths()).collect();
+    let all: Vec<BezPath> = shapes.iter().flat_map(|s| s.leaves()).filter(|l| !l.hidden).flat_map(|l| outline_of(&l)).collect();
     let outline = crate::effects::outer_silhouette(&all);
     let layer = shapes[0].layer;
     let idx = page.shapes.iter().position(|s| sel.contains(&s.id)).unwrap_or(0);
     let picture = image_shape(doc, &img, area, layer);
     let cut_id = doc.alloc_id();
-    let mut cut = Shape::new_path(cut_id, outline, Style { fill: None, stroke: Some(Rgba(40, 40, 40, 255)), no_print: true, ..Style::default() });
+    // the cut line in its layer's colour, like other cut lines
+    let colour = doc.page().layer(layer).map(|l| l.color).unwrap_or(Rgba(40, 40, 40, 255));
+    let mut cut = Shape::new_path(cut_id, outline, Style { fill: None, stroke: Some(colour), no_print: true, ..Style::default() });
     cut.layer = layer;
     let mut children = vec![picture, cut];
     for mut s in shapes {
@@ -263,6 +332,82 @@ pub fn pattern_fill(doc: &mut Document, id: ShapeId, pattern: &[u8], tile_mm: f6
 mod tests {
     use super::*;
     use crate::doc::Document;
+
+    #[test]
+    fn printing_renders_fills_and_leaves_cut_lines_out() {
+        let mut doc = Document::default();
+        {
+            let p = doc.page_mut();
+            p.width = 100.0;
+            p.height = 50.0;
+        }
+        let red = Style { fill: Some(Rgba(255, 0, 0, 255)), ..Style::default() };
+        let line = Style { stroke: Some(Rgba(0, 0, 255, 255)), ..Style::default() };
+        doc.add_path(geom::rect_path(Rect::new(10.0, 10.0, 30.0, 20.0)), red, 0);
+        doc.add_path(geom::rect_path(Rect::new(50.0, 10.0, 90.0, 40.0)), line, 0);
+        let (img, dpi) = render_print(doc.page(), 100.0);
+        assert_eq!(dpi, 100.0);
+        assert_eq!((img.width(), img.height()), (394, 197));
+        let at = |x: f64, y: f64| img.get_pixel((x / 25.4 * dpi) as u32, (y / 25.4 * dpi) as u32).0;
+        assert_eq!(at(20.0, 15.0), [255, 0, 0, 255], "the fill prints");
+        assert_eq!(at(50.0, 25.0), [255, 255, 255, 255], "a cut-only outline doesn't");
+        assert_eq!(at(70.0, 25.0), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn a_white_background_picture_flattens_to_a_cut_line_round_whats_on_it() {
+        // a black 40 x 40 px square in the middle of a white 100 x 100 px picture, 40 x 40 mm
+        let mut img = image::RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255]));
+        for y in 30..70 {
+            for x in 30..70 {
+                img.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+        let mut png = vec![];
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let mut pic = crate::io::import_image(&png).unwrap();
+        if let ShapeKind::Image(d) = &mut pic.kind {
+            (d.width_mm, d.height_mm) = (40.0, 40.0);
+        }
+        let mut doc = Document::default();
+        pic.id = doc.alloc_id();
+        let p = pic.id;
+        doc.page_mut().shapes.push(pic);
+        let g = flatten(&mut doc, &[p]);
+        let grp = doc.page().shape(g[0]).unwrap();
+        let cut = &grp.leaves()[1];
+        // round the 16 x 16 mm square, not the 40 x 40 mm picture
+        use geo::Area;
+        let area = geom::to_multipolygon(&cut.world_paths()).unsigned_area();
+        assert!((area - 256.0).abs() / 256.0 < 0.08, "{area}");
+        // in the layer's colour
+        assert_eq!(cut.style.stroke, Some(doc.page().layers[0].color));
+    }
+
+    #[test]
+    fn a_picture_with_a_shape_cut_out_flattens_to_its_visible_outline() {
+        // a white 100 x 100 px picture, 40 x 40 mm, with a circle cut out of a corner
+        let mut png = vec![];
+        image::RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let mut pic = crate::io::import_image(&png).unwrap();
+        if let ShapeKind::Image(d) = &mut pic.kind {
+            (d.width_mm, d.height_mm) = (40.0, 40.0);
+        }
+        let mut doc = Document::default();
+        pic.id = doc.alloc_id();
+        let p = pic.id;
+        doc.page_mut().shapes.push(pic);
+        let c = doc.add_path(geom::circle_path(Point::new(0.0, 0.0), 20.0), Style::default(), 0);
+        crate::ops::image_mask(&mut doc, &[p, c], false, true).unwrap();
+        let g = flatten(&mut doc, &[p]);
+        let grp = doc.page().shape(g[0]).unwrap();
+        let cut = &grp.leaves()[1];
+        // the square less a quarter circle, not the whole square
+        use geo::Area;
+        let area = geom::to_multipolygon(&cut.world_paths()).unsigned_area();
+        let want = 40.0 * 40.0 - std::f64::consts::PI * 400.0 / 4.0;
+        assert!((area - want).abs() / want < 0.03, "{area} vs {want}");
+    }
 
     #[test]
     fn flatten_prints_the_colours_cuts_the_outside_and_unflattens() {

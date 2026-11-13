@@ -66,7 +66,7 @@ Most cutting software is either locked behind a subscription and a cloud account
 | 🗂️ **Make it screen** | The design split onto mats by material, line colour, fill colour or layer; pack all mats or just one; see your real mat with **PixMat**. |
 | 🎯 **Print & Cut calibration** | Print and cut a test sheet, photograph it, and CutCraft measures and corrects the offset for every Print & Cut job. |
 | 🌐 **Icons & fonts from the web** | Search open icon sets and open-licensed fonts inside CutCraft, or browse SVG Repo and FONT Repo in the built-in browser - downloads come straight in. |
-| 🔌 **Multi-protocol output** | Switchable GPGL / HP-GL / DMPL, Brother ScanNCut over USB; USB, network, Bluetooth or file. |
+| 🔌 **Multi-protocol output** | Switchable GPGL / HP-GL / DMPL, Brother ScanNCut over USB, G-code to GRBL machines over a serial port; USB, network, Bluetooth or file. |
 
 ## Install & run
 
@@ -112,7 +112,7 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev
 - **Ruler guides** - drag from the top or left ruler to place a guide; drag a guide to move it, or back onto a ruler to remove it (View → Clear guides removes them all). Guides are saved with the design but never cut; drawing, point edits and Smart Guides snap to them.
 - **Smart Guides** - while moving, the selection's edges and centre snap into line with other shapes and the page, with guide lines shown. **Snap to objects** - drawing and point edits snap to other shapes' corners, centres and nodes. Both toggle in the View menu.
 - Zoom (wheel / Ctrl±) and pan (middle-drag / Shift+wheel / Pan tool).
-- **Right-click context menu** with actions suited to what you selected (trace an image, edit text, combine multiple shapes, arrange/transform, convert to path …).
+- **Right-click context menu** built from what you selected: a cut shape gets point editing, offset and effects; a picture gets image tools, trace and erase; text gets text tools; several objects get combine and align. Flatten only shows when something prints.
 - Tools: select (move/scale/rotate handles, Shift to constrain), rubber-band select, node editing (drag nodes & handles, add/delete points, line ⇄ curve), line, polyline, smooth curve, freehand, rectangle, rounded rectangle, ellipse, polygon, star, text, knife, eraser, zoom. Their settings (corner radius, polygon sides, star points, eraser size) are in **Edit ▸ Drawing tools**.
 - **Round-corner tool** - click any corner of a path to round or chamfer just that corner; rounded corners can be resized again, and radius 0 makes one sharp.
 - **Image tool** - four modes in the edit bar: **Erase** (brush parts away), **Restore** (brush them back from the original), **Select & erase** (click an area of one colour - e.g. a white background - to clear it, with a tolerance and an *everywhere* option), and **Crop** (drag a box to keep just that part).
@@ -198,6 +198,7 @@ Convex hull, lattice (grid of holes), knockout (recess), stencil bridges (keep i
 
 ### Print & Cut
 
+- **Print** (File ▸ Print…, Ctrl+P) straight to a printer at true size - the Windows print dialog, or the system's printers through CUPS on macOS and Linux - lined up with the paper's corner so Print & Cut marks land where the cutter expects them.
 - Registration marks with a safe area, vector PDF print export, and an interactive camera-mark search on the Graphtec protocol.
 - **Calibration wizard** - adds a test sheet (registration marks, five dots, a square to cut round each, and fine rulers); print it, cut or pen it, then photograph or scan it. CutCraft finds the dots and squares, allows for the camera angle, and works out the shift, turn and size error - or read the rulers by eye and type the numbers in. The correction is saved per machine and applied to every Print & Cut job.
 
@@ -223,6 +224,8 @@ CutCraft ships ~120 machine profiles. Selecting a machine sets the correct wire 
 | **GPGL** | Silhouette Cameo 1-5 / Portrait 1-4 / Curio, Graphtec | 20 units/mm, ETX-terminated. Community dialect (default) + an experimental **Graphtec dialect** that mirrors the Silhouette/Graphtec `TB`-block start-cut, `FX…,0` force and an interactive `DETECT` / `mark_status;` registration search. |
 | **HP-GL** | GCC (Expert/Jaguar/Puma), Roland (CAMM-1 GX/GS), USCutter, Siser (Romeo/Juliet/Momento), Mutoh, SkyCut, Secabo, Foison, Vinyl Express, Pazzles, and many more | For most vinyl cutters. |
 | **DMPL** | Summa (S-class / D60), Houston Instrument, Tenneth | Digital Microprocessor Plotter Language. |
+| **GRBL (G-code over serial)** | Hobby CNC drag knives, pen plotters and diode lasers running GRBL 1.1, grblHAL or FluidNC | Pick **GRBL machine** in Page setup (or the language under Send ▸ Protocol), choose the serial port and **Connect**. Streams with GRBL's flow control, shows the machine's position, jogs, homes, unlocks, sets the origin, frames the job and has a console. The tool goes down by Z axis, servo pen lift or laser (each group's Force is its power); each group's Speed sets the feed. Stop holds the machine then resets it, so it keeps its position. |
+| **Cricut Maker 3 (cutcutgo firmware)** | Maker 3 running a cutcutgo port | GRBL with its own rules: found by USB id, one line at a time, pen, fine-point blade and holder B's drive-housing tools (rotary, knife, scoring wheels, perforation, wavy, debossing, engraving: recognised by the machine, with Load tool and Detect tool buttons and a check at the start of each job), each with its own saved height and speed, the knife blade's 3 mm tip compensation, every move checked against the mat's 301 mm work area (12 x 12 or 12 x 24 in mat), **Print & Cut** by scanning a printed box with the machine's light sensor, Pause / Resume, and a guided way to find a tool height. |
 | **Brother ScanNCut** | CM300/350/550DX/650W, SDX85/125/135/225/230D/325/330D/1000/1200/2200D | **Sent over USB** straight to the machine (put it on its home screen, then **Send to ScanNCut**) - it replies whether it took the file, and CutCraft tells you if it needs to go back to the home screen. Or **Save .fcm…** for CanvasWorkspace or a USB stick. Cut groups cut, Sketch/Score groups draw with the pen, Emboss groups emboss; curves stay curves and the machine does its own blade compensation. 12 × 12 and 12 × 24 in mats. |
 
 **Transports**
@@ -231,7 +234,7 @@ CutCraft ships ~120 machine profiles. Selecting a machine sets the correct wire 
 - **Windows-native USB** two extra ways: **WinUSB bulk pipes** and the legacy **USB printer-class** interface. The scan lists every option it finds.
 - **Network (TCP)**, **Bluetooth (BLE)** and **file** output also work cross-platform.
 
-> Other proprietary binary machines (Cricut, KNK/Zing, Janome) are intentionally **not** supported - their command streams are undocumented binary protocols.
+> Other proprietary binary machines (Cricut on its original firmware, KNK/Zing, Janome) are intentionally **not** supported - their command streams are undocumented binary protocols. A Cricut Maker 3 running the **cutcutgo** firmware is supported, as a GRBL machine.
 
 ## File formats
 
@@ -245,7 +248,7 @@ CutCraft ships ~120 machine profiles. Selecting a machine sets the correct wire 
 
 **Crash recovery:** while there are unsaved changes, a backup is written in the background to the settings folder's `recovery` directory (every 5 minutes by default; Prefs → "Back up unsaved work every", 0 = off). Saving or closing normally deletes it; if CutCraft closed unexpectedly, the next start offers to restore it. Each open window keeps its own backup, so running two copies is safe. Saving is atomic (written to a temporary file, then swapped in), so a crash mid-save can't corrupt the design. CutCraft also remembers its window's position and size, and where you left each popup.
 
-**PDF / AI import** reads the first page's vector paths (lines, curves, rectangles, nested forms) with their fill and stroke colours, at true size; text and embedded images are skipped, with a note in the status bar - convert text to outlines before exporting. **HP-GL import** reads PU/PD/PA/PR, SP (each pen gets its own colour), CI and AA/AR arcs, at 40 units/mm - including CutCraft's own `.plt` export. **EPS import** reads Illustrator EPS (and the PostScript-based `.ai` files of Illustrator 8 and earlier) by their drawing commands, and EPS from other programs (Inkscape/cairo, CorelDRAW…) through a small PostScript interpreter: paths, transforms, colours, fill and stroke, plus embedded pictures, which come in as images (ready for Image Trace). Text is skipped with a note. `.studio3` files are recognised but not decoded - export from Silhouette Studio as SVG/DXF first.
+**PDF / AI import** reads the first page's vector paths (lines, curves, rectangles, nested forms) with their fill and stroke colours, at true size; text and embedded images are skipped, with a note in the status bar - convert text to outlines before exporting. **HP-GL import** reads PU/PD/PA/PR, SP (each pen gets its own colour), CI and AA/AR arcs, at 40 units/mm - including CutCraft's own `.plt` export. **EPS import** reads Illustrator EPS (and the PostScript-based `.ai` files of Illustrator 8 and earlier) by their drawing commands, and EPS from other programs (Inkscape/cairo, CorelDRAW…) through a small PostScript interpreter: paths, transforms, colours, fill and stroke, plus embedded pictures, which come in as images (ready for Image Trace). Text is skipped with a note. **Silhouette Studio import** (`.studio3`, Studio 3 and later) reads the design's outlines (lines and curves, true size, where they sit on the mat) and its pictures, placed in their frames - so a Print & Cut design comes in with its picture and cut line. The format isn't published, so this is worked out from real files: text, colours and cut settings aren't brought over yet (export SVG/DXF from Silhouette Studio for those).
 
 ## Project layout
 
@@ -271,6 +274,7 @@ crates/
     queue.rs       the production queue: several designs as one run
     cutjob.rs      job generation, ordering, overcut, compensation, time + cost estimate
     gpgl.rs        GPGL encoder, HP-GL (.plt) and DMPL export, interactive reg-mark search
+    grbl.rs        G-code for GRBL machines and the serial link (streaming, status, jog, stop)
     device.rs      transports (nusb, WinUSB bulk + printer-class USB, TCP, Bluetooth, file) + background streaming
     brother_usb.rs sending .fcm files to a Brother ScanNCut over USB
     fcm.rs         Brother ScanNCut .fcm import/export (on the vendored fcmlib)
@@ -279,6 +283,7 @@ crates/
     machines.rs    ~120 machine profiles · materials.rs presets · prefs.rs preferences
     io.rs          .cutcraft, SVG/DXF import+export, PDF, images, G-code
     pdfimport.rs   PDF / Illustrator path import (lopdf)
+    studio3.rs     Silhouette Studio .studio3 import (outlines and pictures)
     epsimport.rs   EPS / PostScript import (Illustrator drawing commands, a small PostScript interpreter)
     blend.rs       Blend: steps morphing one shape into another
     hpglimport.rs  HP-GL plotter file import

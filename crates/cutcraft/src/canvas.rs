@@ -979,7 +979,7 @@ fn draw_scene(app: &mut App, painter: &egui::Painter, ctx: &egui::Context, bg: C
     }
 
     // registration marks
-    for m in page.regmarks.print_geometry(page.width, page.height) {
+    for m in cutcraft_core::regmarks::print_marks(page) {
         for pl in geom::flatten(&m, 0.1) {
             let pts: Vec<Pos2> = pl.pts.iter().map(|p| app.view.to_screen(*p)).collect();
             painter.add(egui::Shape::convex_polygon(pts, Color32::BLACK, Stroke::NONE));

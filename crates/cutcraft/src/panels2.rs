@@ -115,9 +115,7 @@ pub struct Extra {
     pub grbl_scanned: Option<cutcraft_core::grbl::Dialect>,
     /// When the last Maker 3 jog can be assumed to show in the reported position.
     pub grbl_jog_until: f64,
-    /// Maker 3: the tool in holder B (None: the fine-point blade), and the
-    /// last scan result already applied to it.
-    pub grbl_b_tool: Option<cutcraft_core::grbl::DriveTool>,
+    /// Maker 3: the last scan result already applied to holder B's tool.
     pub grbl_detected_seen: Option<String>,
     pub grbl_step: f64,
     pub grbl_jog_feed: f64,
@@ -235,7 +233,6 @@ impl Default for Extra {
             grbl_ports: vec![],
             grbl_scanned: None,
             grbl_jog_until: 0.0,
-            grbl_b_tool: None,
             grbl_detected_seen: None,
             grbl_step: 10.0,
             grbl_jog_feed: 1500.0,

@@ -2354,13 +2354,19 @@ fn printcut_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
             len_field(ui, &mut r.thickness, units);
             ui.end_row();
         }
-        ui.label(if maker3 { "Box inset from edge" } else { "Inset from edge" });
+        ui.label(if maker3 { "Margin from page edge" } else { "Inset from edge" });
         len_field(ui, &mut r.inset, units);
         ui.end_row();
     });
     if maker3 {
         r.inset = r.inset.max(11.0);
-        ui.small("The Maker 3 looks for a 3 mm black box round the artwork. Keep it at least 11 mm in from the page edges (15 is safest), and keep anything else dark at least 15 mm outside it.");
+        ui.small("The Maker 3 looks for a 3 mm black box printed 3 mm round your artwork, so it only takes the paper the design needs. Keep the artwork inside the dashed area (the box needs at least 11 mm from the paper's top and left edges; 15 is safest), and anything else dark at least 15 mm outside the box.");
+        ui.add_space(4.0);
+        ui.label("Find the sheet by scanning");
+        for s in cutcraft_core::regmarks::BoxScan::ALL {
+            ui.radio_value(&mut r.scan, s, s.label()).on_hover_text(s.about());
+        }
+        ui.small(r.scan.about());
     }
     if r != before {
         app.checkpoint();
@@ -2369,17 +2375,22 @@ fn printcut_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     ui.separator();
     ui.label("Workflow:");
     ui.label("1. Keep artwork inside the dashed orange safe area.");
-    ui.label("2. Export the print file and print it at 100% scale.");
+    ui.label("2. Print it (or export the print PDF) at 100% scale.");
     if maker3 {
-        ui.label("3. Put the sheet in the mat's top-left corner, load the mat, and Send - the machine scans the box first (about 3 minutes), then cuts.");
+        ui.label("3. Put the sheet in the mat's top-left corner, load the mat, and Send - the machine scans the box first, then cuts.");
         ui.small("White matt paper works best. If cuts always land off the print the same way, set a Print & Cut correction in the Send panel's Machine settings.");
     } else {
         ui.label("3. Load the printed sheet and Send - the cutter scans the marks first.");
     }
     let mut act = None;
-    if ui.button("Export print PDF…").clicked() {
-        act = Some(Action::ExportPdf);
-    }
+    ui.horizontal(|ui| {
+        if ui.button("🖨 Print…").on_hover_text("Send the page with its marks straight to a printer, at exact size (Ctrl+P)").clicked() {
+            act = Some(Action::Print);
+        }
+        if ui.button("Export print PDF…").clicked() {
+            act = Some(Action::ExportPdf);
+        }
+    });
     ui.small("Shapes marked “Don't print” and all cut-only lines are left out of the print.");
     if maker3 {
         return act;

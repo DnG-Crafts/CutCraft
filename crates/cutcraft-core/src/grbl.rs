@@ -253,7 +253,7 @@ pub fn maker3_reach(tool: Option<u8>) -> (f64, f64) {
 /// A tool for holder B's drive housing (the ones with a gear on top). The
 /// machine identifies it from its reflective spots when `M3` scans it. The
 /// fine-point blade has no gear or spots, so it's never scanned.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DriveTool {
     Rotary,
     Knife,
@@ -345,12 +345,19 @@ pub struct Maker3Options {
     /// it's expected.
     pub shift_x: f64,
     pub shift_y: f64,
-    /// A fixed correction for Print & Cut, mm, if cuts always land off the
-    /// print the same way.
-    pub pc_shift_x: f64,
-    pub pc_shift_y: f64,
+    /// A further correction for Print & Cut, mm in the machine's directions,
+    /// on top of [`MAKER3_PC_OFFSET`], if cuts always land off the print the
+    /// same way. (A new name, so a correction saved before that offset was
+    /// built in isn't added to it.)
+    pub pc_nudge_x: f64,
+    pub pc_nudge_y: f64,
     /// Turn the design half a turn (if a test F comes out upside down).
     pub rotate_180: bool,
+    /// The holder last in use (0 pen, 1 holder B), chosen again on connecting.
+    pub active_holder: u8,
+    /// What's in holder B (None: the fine-point blade): tools stay fitted
+    /// between sessions.
+    pub holder_b: Option<DriveTool>,
 }
 
 impl Default for Maker3Options {
@@ -377,10 +384,25 @@ impl Default for Maker3Options {
             engrave_feed: 300.0,
             shift_x: 0.0,
             shift_y: 0.0,
-            pc_shift_x: 0.0,
-            pc_shift_y: 0.0,
+            pc_nudge_x: 0.0,
+            pc_nudge_y: 0.0,
             rotate_180: false,
+            active_holder: 0,
+            holder_b: None,
         }
+    }
+}
+
+/// Where Print & Cut cuts are moved to land on the print, machine mm (+X is
+/// the page's left, +Y down the page): 0.35 mm left and 0.45 mm down, found
+/// by test cuts on a real machine (2026-11-14), from the sensor and blade
+/// offsets and the blade's drag together.
+pub const MAKER3_PC_OFFSET: (f64, f64) = (0.35, 0.45);
+
+impl Maker3Options {
+    /// The whole Print & Cut correction: the built-in offset plus any nudge.
+    pub fn pc_offset(&self) -> kurbo::Vec2 {
+        kurbo::Vec2::new(MAKER3_PC_OFFSET.0 + self.pc_nudge_x, MAKER3_PC_OFFSET.1 + self.pc_nudge_y)
     }
 }
 
@@ -640,11 +662,16 @@ pub fn encode_maker3_mapped(job: &CutJob, bed: (f64, f64), o: &Maker3Options, ma
     }
     // finish at Y0 so the mat ejects cleanly, parked (with the pen's numbers)
     // where holder B can be reached; G4 P0's ok means everything's done
-    if cur.is_some_and(|c| c.holder() == 1) {
+    let ended_on_b = cur.is_some_and(|c| c.holder() == 1);
+    if ended_on_b {
         g.push("T0".into());
         g.push(lift);
     }
     g.push(format!("G1 X{} Y0 F{}", num(MAKER3_PARK_X), num(TRAVEL_FEED)));
+    // and back to the holder it ended on (T moves nothing; both are up)
+    if ended_on_b {
+        g.push("T1".into());
+    }
     g.push("G4 P0".into());
     Ok(g)
 }
@@ -847,13 +874,14 @@ pub struct Crossing {
 }
 
 impl Crossing {
-    /// Put the sensor over the crossing (the scanned axis isn't moved).
+    /// Put the sensor over where the inward scan starts. The firmware drives
+    /// the scanned axis to the start, scans, then drives it back to where it
+    /// was, so starting there keeps those trips short (otherwise the carriage
+    /// goes all the way back to wherever it was, often home, every scan).
     pub fn premove(&self) -> String {
-        if self.axis == 0 {
-            format!("G1 Y{} F{}", num(self.along + SENSOR_OFFSET.1), num(TRAVEL_FEED))
-        } else {
-            format!("G1 X{} F{}", num(self.along + SENSOR_OFFSET.0), num(TRAVEL_FEED))
-        }
+        let start = self.nominal + SCAN_REACH * self.outside;
+        let (x, y) = if self.axis == 0 { (start, self.along) } else { (self.along, start) };
+        format!("G1 X{} Y{} F{}", num(x + SENSOR_OFFSET.0), num(y + SENSOR_OFFSET.1), num(TRAVEL_FEED))
     }
 
     /// Scan inwards from outside, so the first dark band is the box.
@@ -872,12 +900,37 @@ impl Crossing {
     }
 }
 
-/// The 8 crossings of the sensor box (page centre line `rect`), each side at
-/// 25% and 75% of its length, with the sheet in the mat's top-left corner:
-/// nominally X = 301 - x, Y = y.
-pub fn sensor_box_crossings(rect: kurbo::Rect) -> Result<Vec<Crossing>, String> {
+/// How far from a corner its two sides are crossed, for the corner scans.
+const CORNER_IN: f64 = 10.0;
+
+/// Where to cross the sensor box (page centre line `rect`), with the sheet in
+/// the mat's top-left corner (nominally X = 301 - x, Y = y):
+/// - the whole box: each side at 25% and 75% of its length (8 crossings);
+/// - one corner: the left and top sides near the top-left corner (2);
+/// - three corners: both sides near the top-left, top-right and bottom-left
+///   corners (6), enough to fit a turned, unevenly stretched sheet exactly.
+pub fn sensor_box_crossings(rect: kurbo::Rect, scan: crate::regmarks::BoxScan) -> Result<Vec<Crossing>, String> {
+    use crate::regmarks::BoxScan;
     let x = |px: f64| MAKER3_WORK_X - px;
     let mut v = vec![];
+    if scan != BoxScan::Full {
+        let (dx, dy) = (CORNER_IN.min(rect.width() / 4.0), CORNER_IN.min(rect.height() / 4.0));
+        v.push(Crossing { side: "left", axis: 0, nominal: x(rect.x0), along: rect.y0 + dy, outside: 1.0 });
+        v.push(Crossing { side: "top", axis: 1, nominal: rect.y0, along: x(rect.x0 + dx), outside: -1.0 });
+        if scan == BoxScan::ThreeCorners {
+            // top-right
+            v.push(Crossing { side: "right", axis: 0, nominal: x(rect.x1), along: rect.y0 + dy, outside: -1.0 });
+            v.push(Crossing { side: "top", axis: 1, nominal: rect.y0, along: x(rect.x1 - dx), outside: -1.0 });
+            // bottom-left
+            v.push(Crossing { side: "left", axis: 0, nominal: x(rect.x0), along: rect.y1 - dy, outside: 1.0 });
+            v.push(Crossing { side: "bottom", axis: 1, nominal: rect.y1, along: x(rect.x0 + dx), outside: 1.0 });
+        }
+        for c in &v {
+            c.inward()?;
+            c.outward(c.nominal)?;
+        }
+        return Ok(v);
+    }
     for f in [0.25, 0.75] {
         let py = rect.y0 + rect.height() * f;
         // page-left is +X outside, page-right -X
@@ -908,6 +961,8 @@ pub struct Fit {
     pub scale: (f64, f64),
     /// How far the sheet is turned, degrees.
     pub rotation: f64,
+    /// What was measured.
+    pub scan: crate::regmarks::BoxScan,
 }
 
 impl Fit {
@@ -917,7 +972,12 @@ impl Fit {
     }
 
     pub fn summary(&self) -> String {
-        format!("Found the sheet: turned {:.2}°, scale {:.3} × {:.3}, corners within {:.2} mm", self.rotation, self.scale.0, self.scale.1, self.misfit)
+        use crate::regmarks::BoxScan;
+        match self.scan {
+            BoxScan::Corner => format!("Found the sheet's corner: it's {:+.2} mm across and {:+.2} mm down from where it should be", self.m[2] - MAKER3_WORK_X, self.m[5]),
+            BoxScan::ThreeCorners => format!("Found the sheet from three corners: turned {:.2}°, scale {:.3} across × {:.3} down", self.rotation, self.scale.0, self.scale.1),
+            BoxScan::Full => format!("Found the sheet: turned {:.2}°, scale {:.3} × {:.3}, corners within {:.2} mm", self.rotation, self.scale.0, self.scale.1, self.misfit),
+        }
     }
 }
 
@@ -962,6 +1022,63 @@ fn solve3(pts: &[(Point, f64)]) -> Option<[f64; 3]> {
     Some([n[0][3] / n[0][0], n[1][3] / n[1][1], n[2][3] / n[2][2]])
 }
 
+/// Fit the page-to-machine transform straight from the crossings: each one
+/// says a measured machine point lies on a side of the box (page x = the
+/// left or right side's x, or page y = the top or bottom's y). Three or more
+/// of each give the machine-to-page transform, which is then turned round.
+/// No corner is assumed to be where its sides were crossed.
+fn fit_crossings(rect: kurbo::Rect, crossings: &[Crossing], centres: &[f64], scan: crate::regmarks::BoxScan) -> Result<Fit, String> {
+    let bad = || "Couldn't work out the sheet from the scans".to_string();
+    let mut xs = vec![];
+    let mut ys = vec![];
+    for (c, v) in crossings.iter().zip(centres) {
+        let p = c.point(*v);
+        match c.side {
+            "left" => xs.push((p, rect.x0)),
+            "right" => xs.push((p, rect.x1)),
+            "top" => ys.push((p, rect.y0)),
+            _ => ys.push((p, rect.y1)),
+        }
+    }
+    // page = P · machine
+    let px = solve3(&xs).ok_or_else(bad)?;
+    let py = solve3(&ys).ok_or_else(bad)?;
+    let det = px[0] * py[1] - px[1] * py[0];
+    if det.abs() < 1e-12 {
+        return Err(bad());
+    }
+    // machine = P⁻¹ · (page - offset)
+    let (a, b, c, d) = (py[1] / det, -px[1] / det, -py[0] / det, px[0] / det);
+    let m = [a, b, -(a * px[2] + b * py[2]), c, d, -(c * px[2] + d * py[2])];
+    let mut fit = Fit { m, misfit: 0.0, scale: (m[0].hypot(m[3]), m[1].hypot(m[4])), rotation: m[3].atan2(-m[0]).to_degrees(), scan };
+    // with more crossings than needed, how far the fit misses them
+    fit.misfit = xs.iter().map(|(p, v)| (px[0] * p.x + px[1] * p.y + px[2] - v).abs()).chain(ys.iter().map(|(p, v)| (py[0] * p.x + py[1] * p.y + py[2] - v).abs())).fold(0.0, f64::max);
+    for (axis, s) in [("across", fit.scale.0), ("down", fit.scale.1)] {
+        if (s - 1.0).abs() > MAX_SCALE_ERROR {
+            return Err(format!("The print is {:.1}% of its size {axis} the page - print it at 100% / actual size, with no fit-to-page. Nothing was cut.", s * 100.0));
+        }
+    }
+    Ok(fit)
+}
+
+/// Fit the sheet from whichever crossings were scanned (see
+/// [`sensor_box_crossings`]): the whole box, three corners or one.
+pub fn fit_marks(rect: kurbo::Rect, crossings: &[Crossing], centres: &[f64]) -> Result<Fit, String> {
+    use crate::regmarks::BoxScan;
+    let found = |side: &str| crossings.iter().zip(centres).find(|(c, _)| c.side == side).map(|(_, v)| *v);
+    let corner = |a: &str, b: &str| -> Option<Point> { Some(Point::new(found(a)?, found(b)?)) };
+    match crossings.len() {
+        8 => fit_sensor_box(rect, crossings, centres),
+        2 => {
+            // straight and full size: only where the corner is
+            let tl = corner("left", "top").ok_or("Couldn't work out the box's corner from the scans")?;
+            Ok(Fit { m: [-1.0, 0.0, tl.x + rect.x0, 0.0, 1.0, tl.y - rect.y0], misfit: 0.0, scale: (1.0, 1.0), rotation: 0.0, scan: BoxScan::Corner })
+        }
+        6 => fit_crossings(rect, crossings, centres, BoxScan::ThreeCorners),
+        _ => Err("Couldn't work out the sheet from the scans".into()),
+    }
+}
+
 /// Fit the transform from the box as designed (`rect`, page) to where the
 /// scans found it (`centres`, one per crossing), and check it's believable.
 pub fn fit_sensor_box(rect: kurbo::Rect, crossings: &[Crossing], centres: &[f64]) -> Result<Fit, String> {
@@ -979,7 +1096,7 @@ pub fn fit_sensor_box(rect: kurbo::Rect, crossings: &[Crossing], centres: &[f64]
     }
     let fx = solve3(&pairs.iter().map(|(d, m)| (*d, m.x)).collect::<Vec<_>>()).ok_or_else(bad)?;
     let fy = solve3(&pairs.iter().map(|(d, m)| (*d, m.y)).collect::<Vec<_>>()).ok_or_else(bad)?;
-    let mut fit = Fit { m: [fx[0], fx[1], fx[2], fy[0], fy[1], fy[2]], misfit: 0.0, scale: (0.0, 0.0), rotation: 0.0 };
+    let mut fit = Fit { m: [fx[0], fx[1], fx[2], fy[0], fy[1], fy[2]], misfit: 0.0, scale: (0.0, 0.0), rotation: 0.0, scan: crate::regmarks::BoxScan::Full };
     fit.misfit = pairs.iter().map(|(d, m)| fit.apply(*d).distance(*m)).fold(0.0, f64::max);
     fit.scale = (fit.m[0].hypot(fit.m[3]), fit.m[1].hypot(fit.m[4]));
     // page x runs towards -X on the machine
@@ -1114,6 +1231,9 @@ pub struct GrblState {
     /// Maker 3: the tool the last scan of holder B reported ("not found" if
     /// none), as the machine names it.
     pub detected: Option<String>,
+    /// Maker 3: the holder to select when the tool isn't known (on connecting,
+    /// or after a restart).
+    pub preferred_tool: u8,
     pub error: Option<String>,
     /// The conversation, newest last (sent lines start with "> ").
     pub log: VecDeque<String>,
@@ -1184,6 +1304,13 @@ impl GrblLink {
         let st = state.clone();
         std::thread::spawn(move || run_on(wire, dialect, rx, st));
         GrblLink { tx, state, port: "test".into(), dialect }
+    }
+
+    /// Maker 3: which holder to select when the tool isn't known.
+    pub fn prefer_tool(&self, holder: u8) {
+        if let Ok(mut s) = self.state.lock() {
+            s.preferred_tool = holder.min(1);
+        }
     }
 
     pub fn state(&self) -> GrblState {
@@ -1262,6 +1389,37 @@ enum Src {
 trait Wire: Read + Write + Send {}
 impl<T: Read + Write + Send> Wire for T {}
 
+/// How long the machine may go without taking data before the link is
+/// given up on.
+const WRITE_PATIENCE: Duration = Duration::from_secs(10);
+
+fn transient(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock)
+}
+
+/// Write all of `data`. The port's short timeout applies to writes too, and
+/// a busy machine (homing, scanning a tool or a mark, a full queue) may not
+/// take bytes for a while: that's waited out, not taken as a lost link.
+fn put(port: &mut dyn Wire, data: &[u8]) -> std::io::Result<()> {
+    let start = Instant::now();
+    let mut off = 0;
+    while off < data.len() {
+        match port.write(&data[off..]) {
+            Ok(n) if n > 0 => off += n,
+            Ok(_) => {}
+            Err(e) if transient(&e) => {}
+            Err(e) => return Err(e),
+        }
+        if off < data.len() {
+            if start.elapsed() > WRITE_PATIENCE {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the machine stopped taking data for 10 seconds"));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    Ok(())
+}
+
 struct Worker {
     port: Box<dyn Wire>,
     dialect: Dialect,
@@ -1323,10 +1481,10 @@ fn run_on(port: Box<dyn Wire>, dialect: Dialect, rx: mpsc::Receiver<Cmd>, state:
                     Ok(Cmd::Close) | Err(mpsc::TryRecvError::Disconnected) => {
                         if w.job.is_some() {
                             if w.dialect == Dialect::Stock {
-                                w.port.write_all(&[FEED_HOLD])?;
+                                put(&mut *w.port, &[FEED_HOLD])?;
                                 std::thread::sleep(Duration::from_millis(300));
                             }
-                            w.port.write_all(&[SOFT_RESET])?;
+                            put(&mut *w.port, &[SOFT_RESET])?;
                             w.end_job(Some("disconnected".into()));
                         }
                         return Ok(());
@@ -1337,7 +1495,7 @@ fn run_on(port: Box<dyn Wire>, dialect: Dialect, rx: mpsc::Receiver<Cmd>, state:
                             w.pending.clear();
                             w.user.clear();
                         }
-                        w.port.write_all(&[b])?
+                        put(&mut *w.port, &[b])?
                     }
                     Ok(Cmd::Job { lines, progress, cancel }) => w.begin_job(lines, progress, cancel),
                     Ok(Cmd::PrintCut { rect, crossings, cut, progress, cancel }) => w.print_cut(rect, crossings, cut, progress, cancel)?,
@@ -1349,7 +1507,7 @@ fn run_on(port: Box<dyn Wire>, dialect: Dialect, rx: mpsc::Receiver<Cmd>, state:
             // others (ESP32, grblHAL) are already running: nudge them
             let answered = w.state.lock().map(|s| s.answered).unwrap_or(false);
             if w.dialect == Dialect::Stock && !answered && !woke && start.elapsed() > Duration::from_millis(2500) {
-                w.port.write_all(b"\r\n\r\n")?;
+                put(&mut *w.port, b"\r\n\r\n")?;
                 woke = true;
             }
             // the Maker 3 homes itself at power-on and doesn't answer until it's done
@@ -1365,7 +1523,11 @@ fn run_on(port: Box<dyn Wire>, dialect: Dialect, rx: mpsc::Receiver<Cmd>, state:
                 }
             }
             if last_poll.elapsed() > Duration::from_millis(200) {
-                w.port.write_all(&[STATUS])?;
+                // skipped (not waited for) if the machine is too busy to take it
+                match w.port.write(&[STATUS]) {
+                    Err(e) if !transient(&e) => return Err(e),
+                    _ => {}
+                }
                 last_poll = Instant::now();
             }
             w.read()?;
@@ -1375,7 +1537,7 @@ fn run_on(port: Box<dyn Wire>, dialect: Dialect, rx: mpsc::Receiver<Cmd>, state:
     })();
     if let Ok(mut s) = w.state.lock() {
         if let Err(e) = result {
-            s.error = Some(format!("Connection lost: {e}"));
+            s.error = Some(format!("Connection lost ({e}). The machine may still finish the moves it had already been sent: let it stop, then Connect again and Home before the next job."));
         }
         s.closed = true;
         s.open = false;
@@ -1624,7 +1786,7 @@ impl Worker {
                 p.sent = (i + 1) * 2;
             }
         }
-        Ok(fit_sensor_box(rect, crossings, &centres))
+        Ok(fit_marks(rect, crossings, &centres))
     }
 
     /// The next whole line from the machine, if one arrives within a read.
@@ -1688,7 +1850,7 @@ impl Worker {
     /// One `#YE` scan, sent on its own, and its `[MARK ...]` reply (no `ok`).
     fn scan(&mut self, s: &MarkScan, c: &Crossing, cancel: &Arc<AtomicBool>) -> std::io::Result<Result<f64, String>> {
         let line = s.line();
-        self.port.write_all(format!("{line}\n").as_bytes())?;
+        put(&mut *self.port, format!("{line}\n").as_bytes())?;
         log(&self.state, format!("> {line}"));
         let deadline = Instant::now() + Duration::from_secs(40);
         let side = c.side;
@@ -1761,7 +1923,7 @@ impl Worker {
     fn stop(&mut self) -> std::io::Result<()> {
         if self.dialect == Dialect::Maker3 {
             // halts at once and empties the queue, but position needs re-homing
-            self.port.write_all(&[SOFT_RESET])?;
+            put(&mut *self.port, &[SOFT_RESET])?;
             self.pending.clear();
             self.user.clear();
             if let Ok(mut s) = self.state.lock() {
@@ -1770,7 +1932,7 @@ impl Worker {
             return Ok(());
         }
         if self.stopping.is_none() {
-            self.port.write_all(&[FEED_HOLD])?;
+            put(&mut *self.port, &[FEED_HOLD])?;
             self.stopping = Some(Instant::now());
         }
         Ok(())
@@ -1784,7 +1946,7 @@ impl Worker {
         if let Some(t) = self.stopping {
             let held = self.state.lock().map(|s| s.status == "Hold:0" || s.status == "Idle").unwrap_or(false);
             if held || t.elapsed() > Duration::from_millis(1500) {
-                self.port.write_all(&[SOFT_RESET])?;
+                put(&mut *self.port, &[SOFT_RESET])?;
                 self.pending.clear();
                 self.user.clear();
                 self.stopping = None;
@@ -1799,7 +1961,7 @@ impl Worker {
 
     fn write_line(&mut self, line: &str, src: Src) -> std::io::Result<()> {
         let bytes = format!("{line}\n");
-        self.port.write_all(bytes.as_bytes())?;
+        put(&mut *self.port, bytes.as_bytes())?;
         // a job's own $H stays part of the job (its ok is counted below)
         let src = if src == Src::User && line.eq_ignore_ascii_case("$H") { Src::Home } else { src };
         self.pending.push_back((bytes.len(), src));
@@ -2043,10 +2205,11 @@ impl Worker {
             choose_pen = s.status == "Idle" && s.tool.is_none() && !s.busy;
         }
         // The Maker 3 can't say which tool is selected, and each tool's X
-        // reach depends on it. Once it's idle, choose the pen (as at power-on):
-        // lifted first, and nothing else moves.
+        // reach depends on it. Once it's idle, choose the one last used (the
+        // pen at first): lifted first, and nothing else moves.
         if choose_pen && self.dialect == Dialect::Maker3 && self.job.is_none() && self.pending.is_empty() && self.user.is_empty() {
-            self.user.extend(maker3_select_tool(0));
+            let t = self.state.lock().map(|s| s.preferred_tool).unwrap_or(0);
+            self.user.extend(maker3_select_tool(t));
         }
     }
 }
@@ -2317,7 +2480,7 @@ mod tests {
         assert_eq!(g.iter().filter(|l| *l == "G1 X151 Y100 F1500").count(), 2, "{g:?}");
         let t: Vec<&String> = g.iter().filter(|l| l.starts_with('T')).collect();
         // (and back to the pen at the end, to park)
-        assert_eq!(t, ["T0", "T1", "T0"]);
+        assert_eq!(t, ["T0", "T1", "T0", "T1"]);
         let at1 = g.iter().position(|l| l == "T1").unwrap();
         assert_eq!(g[at1 - 1], "G1 Z0 F300");
         assert!(g.contains(&"G1 Z-9 F300".to_string()));
@@ -2429,21 +2592,22 @@ mod tests {
 
     #[test]
     fn the_box_is_crossed_at_a_quarter_and_three_quarters_of_each_side() {
-        let c = sensor_box_crossings(a4_box()).unwrap();
+        let c = sensor_box_crossings(a4_box(), crate::regmarks::BoxScan::Full).unwrap();
         assert_eq!(c.len(), 8);
         let left = c.iter().find(|c| c.side == "left").unwrap();
         // page-left is X 301 - 16.5, crossed a quarter of the way down; outside is +X
         assert_eq!((left.axis, left.nominal, left.along, left.outside), (0, 284.5, 16.5 + 264.0 * 0.25, 1.0));
-        assert_eq!(left.premove(), "G1 Y84.5 F1500");
+        // the sensor goes to where the scan starts, 12 mm outside the line
+        assert_eq!(left.premove(), "G1 X312.6 Y84.5 F1500");
         assert_eq!(left.inward().unwrap(), MarkScan { axis: 0, from: 2965, to: 2725 });
         // back out from 4 mm inside where it was found
         assert_eq!(left.outward(284.0).unwrap().line(), "#YE 0 2800 2965");
         let top = c.iter().find(|c| c.side == "top").unwrap();
         assert_eq!((top.axis, top.nominal, top.outside), (1, 16.5, -1.0));
-        assert_eq!(top.premove(), format!("G1 X{} F1500", num(301.0 - (16.5 + 177.0 * 0.25) + 16.1)));
+        assert_eq!(top.premove(), format!("G1 X{} Y6.5 F1500", num(301.0 - (16.5 + 177.0 * 0.25) + 16.1)));
         assert_eq!(top.inward().unwrap().line(), "#YE 1 45 285");
         // too near the top of the page, a scan would have to start off the mat
-        assert!(sensor_box_crossings(kurbo::Rect::new(11.0, 11.0, 199.0, 286.0)).unwrap_err().contains("top"));
+        assert!(sensor_box_crossings(kurbo::Rect::new(11.0, 11.0, 199.0, 286.0), crate::regmarks::BoxScan::Full).unwrap_err().contains("top"));
     }
 
     /// Where each crossing would find the box if the page were placed by `t`.
@@ -2470,7 +2634,7 @@ mod tests {
     #[test]
     fn the_fit_finds_a_turned_stretched_sheet_and_refuses_bad_ones() {
         let rect = a4_box();
-        let c = sensor_box_crossings(rect).unwrap();
+        let c = sensor_box_crossings(rect, crate::regmarks::BoxScan::Full).unwrap();
         // turned 0.5 degrees, 1.7% long in y, off by 2 mm and 1.5 mm
         let (s, k) = (0.5f64.to_radians().sin(), 0.5f64.to_radians().cos());
         let t = |p: Point| Point::new(301.0 - (p.x * k - p.y * 1.017 * s) + 2.0, p.x * s + p.y * 1.017 * k + 1.5);
@@ -2744,7 +2908,7 @@ mod tests {
         let o = Maker3Options::default();
         let cut: CutMaker = Box::new(move |fit: &Fit| encode_maker3_mapped(&job, page(), &o, &|p| fit.apply(p)));
         let progress = Arc::new(Mutex::new(Progress::default()));
-        link.print_cut(rect, sensor_box_crossings(rect).unwrap(), Some(cut), progress.clone(), Arc::new(AtomicBool::new(false)));
+        link.print_cut(rect, sensor_box_crossings(rect, crate::regmarks::BoxScan::Full).unwrap(), Some(cut), progress.clone(), Arc::new(AtomicBool::new(false)));
         wait("the cut", || progress.lock().unwrap().done);
         let p = progress.lock().unwrap().clone();
         assert_eq!(p.error, None, "{}", p.message);
@@ -2765,12 +2929,75 @@ mod tests {
     }
 
     #[test]
+    fn maker3_print_and_cut_from_one_or_three_corners() {
+        use crate::materials::Tool;
+        use crate::regmarks::BoxScan;
+        let rect = a4_box();
+        for (scan, scans) in [(BoxScan::Corner, 4), (BoxScan::ThreeCorners, 12)] {
+            let (link, ran) = fake_maker3_with(Some((rect, 1.8, 1.2)));
+            wait("the first status", || link.state().status == "Idle");
+            let job = m3_job(Tool::AutoBlade, Action::Cut, vec![at(100.0, 100.0), at(120.0, 100.0)]);
+            let o = Maker3Options::default();
+            let cut: CutMaker = Box::new(move |fit: &Fit| encode_maker3_mapped(&job, page(), &o, &|p| fit.apply(p)));
+            let progress = Arc::new(Mutex::new(Progress::default()));
+            link.print_cut(rect, sensor_box_crossings(rect, scan).unwrap(), Some(cut), progress.clone(), Arc::new(AtomicBool::new(false)));
+            wait("the cut", || progress.lock().unwrap().done);
+            let p = progress.lock().unwrap().clone();
+            assert_eq!(p.error, None, "{scan:?}: {}", p.message);
+            let ran = ran.lock().unwrap().clone();
+            assert_eq!(ran.iter().filter(|l| l.starts_with("#YE")).count(), scans, "{scan:?}");
+            assert!(ran.contains(&"G1 X202.8 Y101.2 F1500".to_string()), "{scan:?}: {ran:?}");
+        }
+    }
+
+    #[test]
+    fn three_corners_find_a_turned_unevenly_stretched_sheet() {
+        use crate::regmarks::BoxScan;
+        let rect = a4_box();
+        let c = sensor_box_crossings(rect, BoxScan::ThreeCorners).unwrap();
+        assert_eq!(c.len(), 6);
+        // turned 1.5 degrees, and printed 1.7% long down the page only: two
+        // corners would read the stretch as more turn
+        let (s, k) = (1.5f64.to_radians().sin(), 1.5f64.to_radians().cos());
+        let t = |p: Point| Point::new(301.0 - (p.x * k - p.y * 1.017 * s) + 2.0, p.x * s + p.y * 1.017 * k + 1.5);
+        let fit = fit_marks(rect, &c, &centres_for(rect, &c, &t)).unwrap();
+        for p in [Point::new(30.0, 30.0), Point::new(100.0, 150.0), Point::new(180.0, 270.0)] {
+            assert!(fit.apply(p).distance(t(p)) < 0.001, "{:?} vs {:?}", fit.apply(p), t(p));
+        }
+        assert!((fit.scale.0 - 1.0).abs() < 0.001 && (fit.scale.1 - 1.017).abs() < 0.001, "{:?}", fit.scale);
+        assert!((fit.rotation - 1.5).abs() < 0.01, "{}", fit.rotation);
+        assert!(fit.summary().contains("three corners"));
+        // a saved "two corners" choice reads as three
+        let old: crate::regmarks::BoxScan = serde_json::from_str("\"TwoCorners\"").unwrap();
+        assert_eq!(old, BoxScan::ThreeCorners);
+        // and one corner only finds where it is
+        let c1 = sensor_box_crossings(rect, BoxScan::Corner).unwrap();
+        assert_eq!(c1.len(), 2);
+        let shift = |p: Point| Point::new(301.0 - p.x + 2.0, p.y + 1.5);
+        let fit = fit_marks(rect, &c1, &centres_for(rect, &c1, &shift)).unwrap();
+        assert!(fit.apply(Point::new(150.0, 200.0)).distance(shift(Point::new(150.0, 200.0))) < 1e-9);
+        assert!(fit.summary().contains("corner"));
+    }
+
+    #[test]
+    fn maker3_print_and_cut_offset_is_built_in() {
+        // 0 / 0 in the settings is the measured offset: 0.35 mm left, 0.45 mm down
+        let o = Maker3Options::default();
+        assert_eq!(o.pc_offset(), kurbo::Vec2::new(0.35, 0.45));
+        let nudged = Maker3Options { pc_nudge_x: -0.35, pc_nudge_y: 0.05, ..Default::default() };
+        assert!((nudged.pc_offset() - kurbo::Vec2::new(0.0, 0.5)).hypot() < 1e-12);
+        // a correction saved under the old name isn't added on top
+        let old: Maker3Options = serde_json::from_str(r#"{"pc_shift_x":0.35,"pc_shift_y":0.45}"#).unwrap();
+        assert_eq!(old.pc_offset(), kurbo::Vec2::new(0.35, 0.45));
+    }
+
+    #[test]
     fn maker3_print_and_cut_stops_if_the_box_isnt_there() {
         let rect = a4_box();
         let (link, ran) = fake_maker3_with(None);
         wait("the first status", || link.state().status == "Idle");
         let progress = Arc::new(Mutex::new(Progress::default()));
-        link.print_cut(rect, sensor_box_crossings(rect).unwrap(), None, progress.clone(), Arc::new(AtomicBool::new(false)));
+        link.print_cut(rect, sensor_box_crossings(rect, crate::regmarks::BoxScan::Full).unwrap(), None, progress.clone(), Arc::new(AtomicBool::new(false)));
         wait("the failure", || progress.lock().unwrap().done);
         let e = progress.lock().unwrap().error.clone().unwrap();
         assert!(e.contains("wasn't found") && e.contains("Nothing was cut"), "{e}");
@@ -2789,7 +3016,8 @@ mod tests {
         assert_eq!(&g[m3 - 6..m3 + 2], ["G1 Z0 F300", "$H", "T1", "G1 Z0 F300", "M5", "; expect tool 31 wavy blade", "M3", "G4 P0"]);
         assert!(g.contains(&"G1 Z-9 F300".to_string()), "{g:?}");
         // steering off, then parked with the pen's numbers where holder B can be reached
-        assert_eq!(&g[g.len() - 6..], ["G1 Z0 F300", "M5", "T0", "G1 Z0 F300", "G1 X150 Y0 F1500", "G4 P0"]);
+        // and back to holder B, which it ended on
+        assert_eq!(&g[g.len() - 7..], ["G1 Z0 F300", "M5", "T0", "G1 Z0 F300", "G1 X150 Y0 F1500", "T1", "G4 P0"]);
         // a fine-point blade never touches steering
         let drag = encode_maker3(&m3_job(Tool::AutoBlade, Action::Cut, vec![at(100.0, 100.0)]), page(), &Maker3Options::default()).unwrap();
         assert!(!drag.iter().any(|l| l == "M3" || l == "M5" || l == "$H"));
@@ -2847,6 +3075,15 @@ mod tests {
         wait("the pen to be chosen", || link.state().tool == Some(0) && ran.lock().unwrap().len() >= 4);
         std::thread::sleep(Duration::from_millis(50));
         ran.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn maker3_chooses_the_holder_last_used_when_connecting() {
+        let (link, ran) = fake_maker3_fitted(None);
+        link.prefer_tool(1);
+        wait("a holder to be chosen", || link.state().tool.is_some() && ran.lock().unwrap().len() >= 4);
+        assert_eq!(link.state().tool, Some(1));
+        assert_eq!(*ran.lock().unwrap(), maker3_select_tool(1));
     }
 
     #[test]
@@ -2943,6 +3180,41 @@ mod tests {
         assert!(!ran.lock().unwrap().iter().any(|l| l.starts_with("G1 Z-")));
         let st = link.state();
         assert!(!st.needs_home && !st.steering);
+    }
+
+    /// A port that takes nothing for the first few writes, then one byte at a time.
+    struct Sluggish {
+        refusals: usize,
+        got: Vec<u8>,
+    }
+
+    impl Read for Sluggish {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::TimedOut.into())
+        }
+    }
+
+    impl Write for Sluggish {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            if self.refusals > 0 {
+                self.refusals -= 1;
+                return if self.refusals % 2 == 0 { Ok(0) } else { Err(std::io::ErrorKind::TimedOut.into()) };
+            }
+            self.got.push(data[0]);
+            Ok(1)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_busy_machine_is_waited_for_not_dropped() {
+        let mut port = Sluggish { refusals: 6, got: vec![] };
+        put(&mut port, b"G1 X10 F1500
+").unwrap();
+        assert_eq!(port.got, b"G1 X10 F1500
+");
     }
 
     #[test]

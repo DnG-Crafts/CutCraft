@@ -131,7 +131,7 @@ pub fn render_print(page: &crate::doc::Page, dpi: f64) -> (image::RgbaImage, f64
             }
         }
     }
-    let marks = page.regmarks.print_geometry(page.width, page.height);
+    let marks = crate::regmarks::print_marks(page);
     if !marks.is_empty() {
         let cov = coverage(&marks, area, w, h, SS);
         paint(&mut img, &cov, (SS * SS) as u16, [0, 0, 0, 255]);

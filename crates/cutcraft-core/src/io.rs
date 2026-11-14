@@ -538,7 +538,7 @@ pub fn export_print_pdf(page: &Page, path: &Path) -> Result<()> {
             }
         }
     }
-    let marks = page.regmarks.print_geometry(page.width, page.height);
+    let marks = crate::regmarks::print_marks(page);
     if !marks.is_empty() {
         content += "0 0 0 rg\n";
         content += &path_ops(&marks);

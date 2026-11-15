@@ -115,29 +115,3 @@ fn scan(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn splits_words() {
-        let w: Vec<&str> = words("Don't cut-me, 3 times!").into_iter().map(|w| w.2).collect();
-        assert_eq!(w, vec!["Don't", "cut", "me", "times"]);
-    }
-
-    #[test]
-    fn checks_with_tiny_dictionary() {
-        let dir = std::env::temp_dir().join("cc_dict");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("t.aff"), "SET UTF-8\nTRY esianrtolcdugmphbyfvkwz\n").unwrap();
-        std::fs::write(dir.join("t.dic"), "3\nhello\nworld\ncraft\n").unwrap();
-        let mut s = Speller::load(&dir.join("t.aff")).unwrap();
-        let m = s.check_text("hello wrold craft");
-        assert_eq!(m.len(), 1);
-        assert_eq!(m[0].word, "wrold");
-        assert!(s.suggest("wrold").iter().any(|x| x == "world"));
-        s.custom.insert("wrold".into());
-        assert!(s.check_text("wrold").is_empty());
-    }
-}

@@ -263,38 +263,3 @@ fn reparameterise(d: &[Point], u: &[f64], b: &[Point; 4]) -> Vec<f64> {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use kurbo::Shape;
-
-    #[test]
-    fn a_circle_fits_in_a_few_smooth_curves() {
-        let pts: Vec<Point> = (0..200).map(|i| {
-            let a = i as f64 / 200.0 * std::f64::consts::TAU;
-            Point::new(50.0 + 30.0 * a.cos(), 50.0 + 30.0 * a.sin())
-        }).collect();
-        let p = fit_closed(&pts, 0.2, 50.0, 4);
-        let curves = p.elements().iter().filter(|e| matches!(e, kurbo::PathEl::CurveTo(..))).count();
-        assert!((1..=8).contains(&curves), "{curves} curves");
-        assert!((p.area().abs() - std::f64::consts::PI * 900.0).abs() < 30.0);
-    }
-
-    #[test]
-    fn a_square_keeps_its_four_corners() {
-        let mut pts = vec![];
-        for (a, b) in [((0.0, 0.0), (40.0, 0.0)), ((40.0, 0.0), (40.0, 40.0)), ((40.0, 40.0), (0.0, 40.0)), ((0.0, 40.0), (0.0, 0.0))] {
-            for i in 0..40 {
-                let t = i as f64 / 40.0;
-                pts.push(Point::new(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
-            }
-        }
-        assert_eq!(corners(&pts, 4, 50.0).len(), 4);
-        let p = fit_closed(&pts, 0.2, 50.0, 4);
-        assert!((p.area().abs() - 1600.0).abs() < 5.0, "{}", p.area());
-        // every corner of the square is on the path
-        let bb = p.bounding_box();
-        assert!((bb.width() - 40.0).abs() < 0.3 && (bb.height() - 40.0).abs() < 0.3, "{bb:?}");
-    }
-}

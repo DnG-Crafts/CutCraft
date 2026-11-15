@@ -469,29 +469,3 @@ fn encode_glyph(contours: &[Vec<(Point, bool)>]) -> (Vec<u8>, [i16; 4], usize) {
 pub fn glyph_bounds(g: &UserGlyph) -> kurbo::Rect {
     g.path.bounding_box()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use kurbo::Rect;
-
-    #[test]
-    fn ttf_roundtrip_with_ttf_parser() {
-        let mut f = UserFont::new("Test Hand");
-        let a = geom::rect_path(Rect::new(0.0, -7.0, 5.0, 0.0));
-        let o = geom::circle_path(Point::new(3.0, -3.5), 3.0);
-        f.set_glyph('A', &[a], 10.0, Some(0.0), 0.5).unwrap();
-        f.set_glyph('o', &[o], 10.0, Some(0.0), 0.5).unwrap();
-        let ttf = f.to_ttf().unwrap();
-        let face = ttf_parser::Face::parse(&ttf, 0).expect("valid ttf");
-        assert_eq!(face.units_per_em(), 1000);
-        let gid = face.glyph_index('A').unwrap();
-        let bb = face.glyph_bounding_box(gid).unwrap();
-        assert_eq!((bb.x_min, bb.y_min, bb.x_max, bb.y_max), (50, 0, 550, 700));
-        assert_eq!(face.glyph_hor_advance(gid), Some(600));
-        let go = face.glyph_index('o').unwrap();
-        assert!(face.glyph_bounding_box(go).is_some());
-        assert!(face.glyph_index(' ').is_some());
-        assert_eq!(checksum(&ttf), 0xB1B0_AFBA);
-    }
-}

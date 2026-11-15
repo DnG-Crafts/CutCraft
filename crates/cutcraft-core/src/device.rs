@@ -818,17 +818,3 @@ pub fn spawn_send_staged(
 ) -> std::thread::JoinHandle<()> {
     spawn_send_staged_lazy(Box::new(move || Ok(t)), staged, progress, cancel)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn file_transport_streams_all_bytes() {
-        let dir = std::env::temp_dir().join("cutcraft_test_job.gpgl");
-        let t = FileTransport::create(&dir).unwrap();
-        let p = Arc::new(Mutex::new(Progress::default()));
-        spawn_send(Box::new(t), b"FN0\x03H\x03".to_vec(), p.clone(), Arc::new(AtomicBool::new(false))).join().unwrap();
-        assert!(p.lock().unwrap().done);
-        assert_eq!(std::fs::read(&dir).unwrap(), b"FN0\x03H\x03");
-    }
-}

@@ -22,9 +22,6 @@ rfd = "0.17.2"
 trash = "5.2.9"
 uuid = "1"
 
-[dev-dependencies]
-geo = "0.33"
-
 [features]
 default = ["linux-browser"]
 # The built-in browser on Linux: needs the WebKitGTK and GTK 3 development

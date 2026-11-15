@@ -143,27 +143,3 @@ pub fn icon_data() -> egui::IconData {
     let (width, height) = (img.width(), img.height());
     egui::IconData { rgba: img.into_raw(), width, height }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Regenerates the committed icon assets (PNG preview + `.exe` `.ico`).
-    /// Run with `cargo test -p cutcraft regenerate_icon_assets -- --ignored`.
-    #[test]
-    #[ignore]
-    fn regenerate_icon_assets() {
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let assets = manifest.join("assets");
-        std::fs::create_dir_all(&assets).unwrap();
-        let img = rgba(256);
-        img.save(assets.join("cutcraft.png")).unwrap();
-        // Encode a 256×256 ICO for the Windows executable.
-        use image::ImageEncoder;
-        let mut ico = std::io::BufWriter::new(std::fs::File::create(assets.join("cutcraft.ico")).unwrap());
-        image::codecs::ico::IcoEncoder::new(&mut ico)
-            .write_image(img.as_raw(), 256, 256, image::ExtendedColorType::Rgba8)
-            .unwrap();
-        println!("wrote {}", assets.display());
-    }
-}

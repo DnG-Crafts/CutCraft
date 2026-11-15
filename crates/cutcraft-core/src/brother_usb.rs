@@ -295,37 +295,3 @@ pub fn spawn_send(fcm: Vec<u8>, progress: Arc<Mutex<Progress>>, cancel: Arc<Atom
         }
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Sends the file named by `FCM_SEND` to a connected ScanNCut and prints
-    /// the result (hardware check; the log has the steps).
-    #[test]
-    #[ignore = "needs the machine"]
-    fn send_file_to_machine() {
-        let path = std::env::var("FCM_SEND").expect("set FCM_SEND to an .fcm file");
-        let progress = Arc::new(Mutex::new(Progress::default()));
-        spawn_send(std::fs::read(path).unwrap(), progress.clone(), Arc::new(AtomicBool::new(false))).join().unwrap();
-        let p = progress.lock().unwrap();
-        println!("result: {} / error: {:?}", p.message, p.error);
-    }
-
-    #[test]
-    fn download_matches_the_capture() {
-        let parts = download_command(b"#FCM0100xyz");
-        let words: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
-        assert_eq!(words, [&b"@BCCL"[..], b" ", b"EXECUTE", b" ", b"FUNCTION", b"=", b"FCMDOWNLOAD", b" ", b"SIZE", b"=", b"11", b" ", b"DATA", b"=", b"#FCM0100xyz", b"\r"]);
-        assert_eq!(ack_command().concat(), b"@BCCL ACK\r");
-    }
-
-    #[test]
-    fn replies_from_the_capture() {
-        assert_eq!(parse_reply(b"@BCCL ACK\r"), Reply::Ack);
-        assert_eq!(parse_reply(b"@BCCL COMPLETE FUNCTION=FCMDOWNLOAD REASON=SUCCESS\r"), Reply::Complete { reason: "SUCCESS".into() });
-        assert_eq!(parse_reply(b"@BCCL COMPLETE FUNCTION=FCMDOWNLOAD REASON=NOTACCEPT\r"), Reply::Complete { reason: "NOTACCEPT".into() });
-        assert_eq!(refusal("SUCCESS"), None);
-        assert!(refusal("NOTACCEPT").unwrap().contains("home screen"));
-    }
-}

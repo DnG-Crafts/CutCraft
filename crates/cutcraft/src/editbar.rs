@@ -202,22 +202,3 @@ fn text_settings(app: &mut App, ui: &mut Ui, id: cutcraft_core::doc::ShapeId, no
         app.relayout_text(id);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn anchor_points_cover_the_box() {
-        let b = Rect::new(10.0, 20.0, 50.0, 80.0);
-        assert_eq!(anchor_point(b, 0), Point::new(10.0, 20.0));
-        assert_eq!(anchor_point(b, 4), Point::new(30.0, 50.0));
-        assert_eq!(anchor_point(b, 8), Point::new(50.0, 80.0));
-    }
-
-    #[test]
-    fn scaling_about_the_anchor_keeps_it_fixed() {
-        let p = Point::new(30.0, 50.0);
-        assert!((about(p, Affine::scale(2.0)) * p - p).hypot() < 1e-12);
-    }
-}

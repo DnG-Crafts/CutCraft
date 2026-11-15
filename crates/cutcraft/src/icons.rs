@@ -92,6 +92,7 @@ pub enum Icon {
     PathTools,
     Warp,
     Colours,
+    Machine,
 }
 
 /// A square icon button. `selected` draws it pressed.
@@ -585,6 +586,13 @@ pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, ink: Color32, accent: Color
             for x in [0.2, 0.5, 0.8] {
                 p.circle_filled(at(x, 0.5), r.width() * 0.08, ink);
             }
+        }
+        Icon::Machine => {
+            // a cutter from the front: the body, the rail and the carriage
+            rect(0.04, 0.38, 0.96, 0.78, s);
+            line(&[(0.12, 0.52), (0.88, 0.52)], a);
+            rect(0.38, 0.22, 0.62, 0.6, s);
+            line(&[(0.5, 0.6), (0.5, 0.7)], a);
         }
         Icon::Make => {
             // a blade cutting along a dashed line

@@ -63,6 +63,8 @@ pub struct Prefs {
     pub grbl: crate::grbl::GrblOptions,
     /// The Cricut Maker 3 on cutcutgo: heights, feeds, where the page sits, limits.
     pub maker3: crate::grbl::Maker3Options,
+    /// The Cricut Explore 3 on cutcutgo: its own heights, speeds and offsets.
+    pub explore3: crate::grbl::Maker3Options,
     /// Edit-bar anchor point (0..9, row-major from the top-left).
     pub anchor: usize,
     /// Line the dragged selection up with other shapes and the page.
@@ -79,6 +81,24 @@ pub struct Prefs {
     pub browser_adblock: bool,
     /// The main window's last position and size, restored at start.
     pub window: Option<WindowPlacement>,
+}
+
+impl Prefs {
+    /// The settings for `machine` if it's a Cricut on cutcutgo, with its model set.
+    pub fn cricut_mut(&mut self, machine: &str) -> &mut crate::grbl::Maker3Options {
+        let model = crate::grbl::cricut_model(machine).unwrap_or_default();
+        let o = if model == crate::grbl::CricutModel::Explore3 { &mut self.explore3 } else { &mut self.maker3 };
+        o.model = model;
+        o
+    }
+
+    /// A copy of [`Prefs::cricut_mut`]'s settings.
+    pub fn cricut(&self, machine: &str) -> crate::grbl::Maker3Options {
+        let model = crate::grbl::cricut_model(machine).unwrap_or_default();
+        let mut o = if model == crate::grbl::CricutModel::Explore3 { self.explore3.clone() } else { self.maker3.clone() };
+        o.model = model;
+        o
+    }
 }
 
 impl Default for Prefs {
@@ -103,6 +123,7 @@ impl Default for Prefs {
             gpgl_dialect: crate::gpgl::GpglDialect::default(),
             grbl: Default::default(),
             maker3: Default::default(),
+            explore3: crate::grbl::Maker3Options::explore3(),
             anchor: 0,
             smart_guides: true,
             snap_objects: true,

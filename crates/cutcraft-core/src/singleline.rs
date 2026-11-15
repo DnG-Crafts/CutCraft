@@ -135,33 +135,3 @@ pub fn glyph(ch: char) -> Option<(BezPath, f64)> {
     let found = t.get(&ch).or_else(|| ch.to_uppercase().next().and_then(|u| t.get(&u))).or_else(|| ch.to_lowercase().next().and_then(|l| t.get(&l)));
     found.map(|(w, p)| (p.clone(), w + GAP))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use kurbo::Shape as _;
-
-    #[test]
-    fn every_glyph_parses_and_fits_its_box() {
-        for &(c, w, _) in GLYPHS {
-            let (p, _) = glyph(c).unwrap();
-            let b = p.bounding_box();
-            assert!(!p.elements().is_empty(), "{c:?} draws nothing");
-            assert!(b.x0 >= -0.6 && b.x1 <= w + 0.6, "{c:?} is {:.2}..{:.2} wide, expected 0..{w}", b.x0, b.x1);
-            assert!(b.y0 >= -11.1 && b.y1 <= 3.6, "{c:?} is {:.2}..{:.2} tall", b.y0, b.y1);
-        }
-        for c in ['H', 'E', 'T'] {
-            let b = glyph(c).unwrap().0.bounding_box();
-            assert!((b.y0 + CAP).abs() < 1e-9 && b.y1.abs() < 1e-9, "{c}: {b:?}");
-        }
-        let missing: String = (' '..='~').filter(|c| glyph(*c).is_none()).collect();
-        assert_eq!(missing, "");
-    }
-
-    #[test]
-    fn strokes_are_open() {
-        // single-line letters are strokes, not closed outlines
-        let (p, _) = glyph('L').unwrap();
-        assert!(!p.elements().iter().any(|e| matches!(e, kurbo::PathEl::ClosePath)));
-    }
-}

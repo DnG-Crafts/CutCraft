@@ -44,6 +44,7 @@ pub enum Panel {
     Effects,
     PrintCut,
     Send,
+    Machine,
     Prefs,
     Warp,
     PixScan,
@@ -66,7 +67,7 @@ pub enum Panel {
 }
 
 impl Panel {
-    pub const ALL: [(Panel, &'static str); 30] = [
+    pub const ALL: [(Panel, &'static str); 31] = [
         (Panel::Page, "Page"),
         (Panel::Transform, "Transform"),
         (Panel::Replicate, "Replicate"),
@@ -96,6 +97,7 @@ impl Panel {
         (Panel::PrintCut, "Print & Cut"),
         (Panel::Queue, "Queue"),
         (Panel::Send, "Send"),
+        (Panel::Machine, "Machine"),
         (Panel::Prefs, "Prefs"),
     ];
 }
@@ -126,7 +128,7 @@ pub struct PanelState {
     /// Undo depth the History list last showed (to scroll to the current step).
     pub history_seen: usize,
     /// The panel last shown in each side-panel category.
-    pub cat_panel: [Option<Panel>; 7],
+    pub cat_panel: [Option<Panel>; 8],
     /// What the image tool does.
     pub image_mode: ImageMode,
     /// Select & Erase: how different a colour may be (0..100).
@@ -231,7 +233,7 @@ impl Default for PanelState {
             corner_chamfer: false,
             bar_rot: 0.0,
             history_seen: usize::MAX,
-            cat_panel: [None; 7],
+            cat_panel: [None; 8],
             image_mode: ImageMode::Erase,
             select_tolerance: 20.0,
             select_everywhere: false,
@@ -368,6 +370,7 @@ pub fn show(app: &mut App, ui: &mut Ui) -> Option<Action> {
             Panel::Effects => effects_panel(app, ui),
             Panel::PrintCut => printcut_panel(app, ui),
             Panel::Send => send_panel(app, ui),
+            Panel::Machine => machine_panel(app, ui),
             Panel::Prefs => prefs_panel(app, ui),
             Panel::Warp => crate::panels2::warp_panel(app, ui),
             Panel::PixScan => crate::panels2::pixscan_panel(app, ui),
@@ -432,21 +435,7 @@ fn history_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
 fn page_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     let units = app.prefs.units;
     ui.heading("Page setup");
-    let mut machine = app.doc.machine.clone();
-    egui::ComboBox::from_label("Machine").selected_text(machines::by_id(&machine).name).show_ui(ui, |ui| {
-        for m in machines::MACHINES {
-            ui.selectable_value(&mut machine, m.id.to_string(), m.name);
-        }
-    });
-    if machine != app.doc.machine {
-        app.checkpoint();
-        app.doc.machine = machine.clone();
-        app.prefs.default_machine = machine;
-        // Adopt the machine's wire language as the default protocol.
-        app.prefs.protocol = machines::by_id(&app.doc.machine).protocol;
-    }
-    let m = machines::by_id(&app.doc.machine);
-    ui.label(format!("Max cutting width {:.0} mm · {} tool slot(s)", m.max_width, m.tool_slots));
+    machine_line(app, ui);
     ui.separator();
 
     let mut preset = app.ps.page_preset;
@@ -1253,12 +1242,14 @@ fn style_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
         CutStyle::Cut => 1,
         CutStyle::CutEdge => 2,
         CutStyle::Perforate { .. } => 3,
+        CutStyle::Draw => 4,
     };
     ui.horizontal_wrapped(|ui| {
         ui.radio_value(&mut kind, 0, "No cut");
         ui.radio_value(&mut kind, 1, "Cut");
         ui.radio_value(&mut kind, 2, "Cut edge");
         ui.radio_value(&mut kind, 3, "Perforate");
+        ui.radio_value(&mut kind, 4, "Draw").on_hover_text("Draw the lines with the pen instead of cutting them. Drawing is done first, then the cuts, in the same job: on a Cricut the pen is in holder A, so nothing needs changing.");
     });
     let (mut on, mut off) = match st.cut {
         CutStyle::Perforate { on, off } => (on, off),
@@ -1276,6 +1267,7 @@ fn style_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
         0 => CutStyle::NoCut,
         1 => CutStyle::Cut,
         2 => CutStyle::CutEdge,
+        4 => CutStyle::Draw,
         _ => CutStyle::Perforate { on: on.max(0.1), off: off.max(0.1) },
     };
     if st != before {
@@ -2378,7 +2370,7 @@ fn printcut_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     ui.label("2. Print it (or export the print PDF) at 100% scale.");
     if maker3 {
         ui.label("3. Put the sheet in the mat's top-left corner, load the mat, and Send - the machine scans the box first, then cuts.");
-        ui.small("White matt paper works best. If cuts always land off the print the same way, set a Print & Cut correction in the Send panel's Machine settings.");
+        ui.small("White matt paper works best. If cuts always land off the print the same way, set a Print & Cut correction in the Machine tab's Machine settings.");
     } else {
         ui.label("3. Load the printed sheet and Send - the cutter scans the marks first.");
     }
@@ -2407,10 +2399,217 @@ fn printcut_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     act
 }
 
+// ------------------------------------------------------------------ machine
+
+/// One line naming the machine, with a way to the Machine tab.
+fn machine_line(app: &mut App, ui: &mut Ui) {
+    // the firmware note is for the picker; here the machine is enough
+    let name = machines::by_id(&app.doc.machine).name;
+    let name = match name.find(" (") {
+        Some(i) if name[i..].contains("firmware") => &name[..i],
+        _ => name,
+    };
+    ui.horizontal(|ui| {
+        ui.label("Machine:");
+        ui.strong(name);
+    });
+    ui.horizontal(|ui| {
+        if let Some(s) = connection_state(app) {
+            let colour = match s {
+                "connected" => Color32::from_rgb(60, 185, 90),
+                "connecting…" => Color32::from_rgb(230, 170, 50),
+                _ => Color32::from_rgb(225, 75, 70),
+            };
+            let text = RichText::new(format!("● {s}")).strong().color(colour);
+            if s == "not connected" {
+                let r = ui.add(egui::Button::new(text).frame(false)).on_hover_text("Click to connect with the last settings");
+                if r.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if r.clicked() {
+                    crate::grbl_ui::quick_connect(app);
+                }
+            } else {
+                ui.label(text);
+            }
+        }
+        if ui.button("Change machine").on_hover_text("The Machine tab: which machine, how it's connected, and its settings").clicked() {
+            app.panel = Panel::Machine;
+        }
+    });
+}
+
+/// Whether a serial machine is connected (other machines connect per job).
+fn connection_state(app: &App) -> Option<&'static str> {
+    if protocol(app) != gpgl::Protocol::Grbl || is_brother(app) {
+        return None;
+    }
+    Some(match app.ps.x.grbl.as_ref().map(|l| l.state()) {
+        Some(s) if s.answered && !s.closed => "connected",
+        Some(s) if !s.closed => "connecting…",
+        _ => "not connected",
+    })
+}
+
+/// Everything about the machine in one place: which one, how it's
+/// connected, and its controls and settings.
+fn machine_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
+    ui.heading("Machine");
+    let mut machine = app.doc.machine.clone();
+    // scroll the open list to the chosen machine, once each time it opens
+    let scrolled = egui::Id::new("machine-list-scrolled");
+    let open = egui::ComboBox::from_id_salt("machine").selected_text(machines::by_id(&machine).name).width(280.0).show_ui(ui, |ui| {
+        let first = !ui.ctx().data(|d| d.get_temp::<bool>(scrolled).unwrap_or(false));
+        let mut list: Vec<_> = machines::MACHINES.iter().collect();
+        list.sort_by_key(|m| m.name.to_lowercase());
+        for m in list {
+            let r = ui.selectable_value(&mut machine, m.id.to_string(), m.name);
+            if first && m.id == app.doc.machine {
+                r.scroll_to_me(Some(egui::Align::Center));
+            }
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(scrolled, true));
+    });
+    if open.inner.is_none() {
+        ui.ctx().data_mut(|d| d.insert_temp(scrolled, false));
+    }
+    if machine != app.doc.machine {
+        app.checkpoint();
+        app.doc.machine = machine.clone();
+        app.prefs.default_machine = machine;
+        // Adopt the machine's wire language as the default protocol.
+        app.prefs.protocol = machines::by_id(&app.doc.machine).protocol;
+    }
+    let m = machines::by_id(&app.doc.machine);
+    ui.label(format!("Max cutting width {:.0} mm · {} tool slot(s)", m.max_width, m.tool_slots));
+    let brother = is_brother(app);
+    let maker3 = cutcraft_core::grbl::is_maker3(&app.doc.machine);
+    let grbl = !brother && protocol(app) == gpgl::Protocol::Grbl;
+    // ---- protocol (none to choose for a Brother machine or the Maker 3)
+    if !brother && !maker3 {
+        ui.separator();
+        ui.heading("Protocol");
+        ui.horizontal(|ui| {
+            ui.label("Language:");
+            egui::ComboBox::from_id_salt("proto")
+                .selected_text(gpgl::Protocol::ALL.iter().find(|(p, _)| *p == protocol(app)).map(|(_, n)| *n).unwrap_or(""))
+                .show_ui(ui, |ui| {
+                    for (p, name) in gpgl::Protocol::ALL {
+                        // Brother's file format comes with choosing a Brother machine
+                    if p != gpgl::Protocol::Fcm {
+                        ui.selectable_value(&mut app.prefs.protocol, p, name);
+                    }
+                    }
+                });
+        });
+        if protocol(app) == gpgl::Protocol::Gpgl {
+            ui.horizontal(|ui| {
+                ui.label("GPGL dialect:");
+                egui::ComboBox::from_id_salt("dialect")
+                    .selected_text(gpgl::GpglDialect::ALL.iter().find(|(d, _)| *d == app.prefs.gpgl_dialect).map(|(_, n)| *n).unwrap_or(""))
+                    .show_ui(ui, |ui| {
+                        for (d, name) in gpgl::GpglDialect::ALL {
+                            ui.selectable_value(&mut app.prefs.gpgl_dialect, d, name);
+                        }
+                    });
+            });
+            if app.prefs.gpgl_dialect == gpgl::GpglDialect::Graphtec {
+                ui.small("Experimental Graphtec command forms - run a test cut first.");
+            }
+        } else if protocol(app) == gpgl::Protocol::Grbl {
+            ui.small("G-code streamed over a serial port to a GRBL controller: hobby CNC drag knives, pen plotters and lasers.");
+        } else {
+            ui.small("HP-GL output for non-Silhouette cutters (Roland, GCC, USCutter, …).");
+        }
+
+    }
+
+    // ---- connection (a Brother machine has none: its job is saved as a file)
+    ui.separator();
+    if brother {
+        ui.heading("Brother ScanNCut");
+        ui.label("Connect the ScanNCut by USB and Send, or save an .fcm file for CanvasWorkspace or a USB stick.");
+        ui.small(format!(
+            "Uses the {} mat's cut area ({:.0} × {:.0} mm). Cut groups cut; Sketch/Score groups draw with the pen; Emboss groups emboss. The machine does its own blade compensation.",
+            if app.doc.page().mat == cutcraft_core::doc::MatKind::Mat12x24 { "12 × 24 in" } else { "12 × 12 in" },
+            cutcraft_core::fcm::cut_area_mm(app.doc.page().mat).0,
+            cutcraft_core::fcm::cut_area_mm(app.doc.page().mat).1
+        ));
+    }
+    if grbl {
+        crate::grbl_ui::section(app, ui);
+    }
+    if !brother && !grbl {
+        ui.heading("Connection");
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut app.ps.conn, Conn::Usb, "USB");
+            ui.radio_value(&mut app.ps.conn, Conn::Bluetooth, "Bluetooth");
+            ui.radio_value(&mut app.ps.conn, Conn::Tcp, "Network");
+            ui.radio_value(&mut app.ps.conn, Conn::File, "File");
+        });
+        match app.ps.conn {
+            Conn::Usb => {
+                ui.horizontal(|ui| {
+                    if ui.button("⟳ Scan").clicked() || app.ps.usb_devices.is_empty() && app.ps.device_info.is_empty() {
+                        let mut all = device::list_winusb();
+                        all.extend(device::list_usb());
+                        all.extend(device::list_nusb()); // cross-platform (Linux/macOS/Windows)
+                        // cutters (vid_0b4d) first, WinUSB ahead of printer-class
+                        all.sort_by_key(|d| (!d.path.to_lowercase().contains("0b4d"), !d.winusb));
+                        app.ps.usb_devices = all;
+                        app.ps.usb_idx = 0;
+                        app.ps.device_info = format!("{} USB device(s) found", app.ps.usb_devices.len());
+                    }
+                });
+                ui.add(egui::Label::new(&app.ps.device_info).wrap());
+                if !app.ps.usb_devices.is_empty() {
+                    let idx = app.ps.usb_idx.min(app.ps.usb_devices.len() - 1);
+                    egui::ComboBox::from_id_salt("usb").selected_text(&app.ps.usb_devices[idx].description).width(260.0).show_ui(ui, |ui| {
+                        for (i, d) in app.ps.usb_devices.iter().enumerate() {
+                            ui.selectable_value(&mut app.ps.usb_idx, i, format!("{} - {}", d.description, short(&d.path)));
+                        }
+                    });
+                }
+            }
+            Conn::Bluetooth => crate::panels2::bluetooth_section(app, ui),
+            Conn::Tcp => {
+                if app.ps.tcp_addr.is_empty() {
+                    app.ps.tcp_addr = app.prefs.last_tcp_address.clone();
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Address");
+                    ui.text_edit_singleline(&mut app.ps.tcp_addr);
+                });
+            }
+            Conn::File => {
+                ui.small("Writes the GPGL stream to a file instead of a device.");
+            }
+        }
+        if app.ps.conn != Conn::File && ui.button("Query status & firmware").clicked() {
+            match open_transport(app) {
+                Ok(Some(mut t)) => {
+                    let st = device::query_status(t.as_mut()).map(|s| format!("{s:?}")).unwrap_or_else(|e| e.to_string());
+                    let fw = device::query_firmware(t.as_mut()).unwrap_or_else(|e| e.to_string());
+                    app.ps.device_info = format!("Status: {st} · Firmware: {fw}");
+                }
+                Ok(None) => {}
+                Err(e) => app.ps.device_info = format!("Error: {e}"),
+            }
+        }
+    }
+
+    ui.separator();
+    if ui.button("Go to Send ▸").on_hover_text("Choose what each group does and send the job").clicked() {
+        app.panel = Panel::Send;
+    }
+    None
+}
+
 // ------------------------------------------------------------------ send
 
 fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     ui.heading("Send to cutter");
+    machine_line(app, ui);
     let mut act = None;
     // ---- grouping mode
     let mut mode = app.plan.mode;
@@ -2428,6 +2627,7 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
     // a Brother ScanNCut sets force, speed and blade itself: only what each group does matters
     let brother = is_brother(app);
     let maker3 = cutcraft_core::grbl::is_maker3(&app.doc.machine);
+    let cricut = cutcraft_core::grbl::cricut_model(&app.doc.machine);
     let grbl = !brother && protocol(app) == gpgl::Protocol::Grbl;
     let mut changed = false;
     for (gi, g) in app.plan.groups.iter_mut().enumerate() {
@@ -2466,7 +2666,7 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
                 ui.label("Tool");
                 egui::ComboBox::from_id_salt(("tool", gi)).selected_text(g.settings.tool.label()).show_ui(ui, |ui| {
                     for t in CutTool::ALL {
-                        if tool_offered(maker3, t) {
+                        if tool_offered(cricut, t) {
                             changed |= ui.selectable_value(&mut g.settings.tool, t, t.label()).changed();
                         }
                     }
@@ -2596,119 +2796,6 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
         ui.add(egui::Slider::new(&mut app.cs.preview_t, 0.0..=1.0).show_value(false));
     });
 
-    // ---- protocol (none to choose for a Brother machine or the Maker 3)
-    if !brother && !maker3 {
-        ui.separator();
-        ui.heading("Protocol");
-        ui.horizontal(|ui| {
-            ui.label("Language:");
-            egui::ComboBox::from_id_salt("proto")
-                .selected_text(gpgl::Protocol::ALL.iter().find(|(p, _)| *p == protocol(app)).map(|(_, n)| *n).unwrap_or(""))
-                .show_ui(ui, |ui| {
-                    for (p, name) in gpgl::Protocol::ALL {
-                        // Brother's file format comes with choosing a Brother machine
-                    if p != gpgl::Protocol::Fcm {
-                        ui.selectable_value(&mut app.prefs.protocol, p, name);
-                    }
-                    }
-                });
-        });
-        if protocol(app) == gpgl::Protocol::Gpgl {
-            ui.horizontal(|ui| {
-                ui.label("GPGL dialect:");
-                egui::ComboBox::from_id_salt("dialect")
-                    .selected_text(gpgl::GpglDialect::ALL.iter().find(|(d, _)| *d == app.prefs.gpgl_dialect).map(|(_, n)| *n).unwrap_or(""))
-                    .show_ui(ui, |ui| {
-                        for (d, name) in gpgl::GpglDialect::ALL {
-                            ui.selectable_value(&mut app.prefs.gpgl_dialect, d, name);
-                        }
-                    });
-            });
-            if app.prefs.gpgl_dialect == gpgl::GpglDialect::Graphtec {
-                ui.small("Experimental Graphtec command forms - run a test cut first.");
-            }
-        } else if protocol(app) == gpgl::Protocol::Grbl {
-            ui.small("G-code streamed over a serial port to a GRBL controller: hobby CNC drag knives, pen plotters and lasers.");
-        } else {
-            ui.small("HP-GL output for non-Silhouette cutters (Roland, GCC, USCutter, …).");
-        }
-
-    }
-
-    // ---- connection (a Brother machine has none: its job is saved as a file)
-    ui.separator();
-    if brother {
-        ui.heading("Brother ScanNCut");
-        ui.label("Connect the ScanNCut by USB and Send, or save an .fcm file for CanvasWorkspace or a USB stick.");
-        ui.small(format!(
-            "Uses the {} mat's cut area ({:.0} × {:.0} mm). Cut groups cut; Sketch/Score groups draw with the pen; Emboss groups emboss. The machine does its own blade compensation.",
-            if app.doc.page().mat == cutcraft_core::doc::MatKind::Mat12x24 { "12 × 24 in" } else { "12 × 12 in" },
-            cutcraft_core::fcm::cut_area_mm(app.doc.page().mat).0,
-            cutcraft_core::fcm::cut_area_mm(app.doc.page().mat).1
-        ));
-    }
-    if grbl {
-        crate::grbl_ui::section(app, ui);
-    }
-    if !brother && !grbl {
-        ui.heading("Connection");
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut app.ps.conn, Conn::Usb, "USB");
-            ui.radio_value(&mut app.ps.conn, Conn::Bluetooth, "Bluetooth");
-            ui.radio_value(&mut app.ps.conn, Conn::Tcp, "Network");
-            ui.radio_value(&mut app.ps.conn, Conn::File, "File");
-        });
-        match app.ps.conn {
-            Conn::Usb => {
-                ui.horizontal(|ui| {
-                    if ui.button("⟳ Scan").clicked() || app.ps.usb_devices.is_empty() && app.ps.device_info.is_empty() {
-                        let mut all = device::list_winusb();
-                        all.extend(device::list_usb());
-                        all.extend(device::list_nusb()); // cross-platform (Linux/macOS/Windows)
-                        // cutters (vid_0b4d) first, WinUSB ahead of printer-class
-                        all.sort_by_key(|d| (!d.path.to_lowercase().contains("0b4d"), !d.winusb));
-                        app.ps.usb_devices = all;
-                        app.ps.usb_idx = 0;
-                        app.ps.device_info = format!("{} USB device(s) found", app.ps.usb_devices.len());
-                    }
-                });
-                ui.add(egui::Label::new(&app.ps.device_info).wrap());
-                if !app.ps.usb_devices.is_empty() {
-                    let idx = app.ps.usb_idx.min(app.ps.usb_devices.len() - 1);
-                    egui::ComboBox::from_id_salt("usb").selected_text(&app.ps.usb_devices[idx].description).width(260.0).show_ui(ui, |ui| {
-                        for (i, d) in app.ps.usb_devices.iter().enumerate() {
-                            ui.selectable_value(&mut app.ps.usb_idx, i, format!("{} - {}", d.description, short(&d.path)));
-                        }
-                    });
-                }
-            }
-            Conn::Bluetooth => crate::panels2::bluetooth_section(app, ui),
-            Conn::Tcp => {
-                if app.ps.tcp_addr.is_empty() {
-                    app.ps.tcp_addr = app.prefs.last_tcp_address.clone();
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Address");
-                    ui.text_edit_singleline(&mut app.ps.tcp_addr);
-                });
-            }
-            Conn::File => {
-                ui.small("Writes the GPGL stream to a file instead of a device.");
-            }
-        }
-        if app.ps.conn != Conn::File && ui.button("Query status & firmware").clicked() {
-            match open_transport(app) {
-                Ok(Some(mut t)) => {
-                    let st = device::query_status(t.as_mut()).map(|s| format!("{s:?}")).unwrap_or_else(|e| e.to_string());
-                    let fw = device::query_firmware(t.as_mut()).unwrap_or_else(|e| e.to_string());
-                    app.ps.device_info = format!("Status: {st} · Firmware: {fw}");
-                }
-                Ok(None) => {}
-                Err(e) => app.ps.device_info = format!("Error: {e}"),
-            }
-        }
-    }
-
     // ---- send buttons
     ui.separator();
     let prog = app.progress.lock().map(|p| p.clone()).unwrap_or_default();
@@ -2728,6 +2815,16 @@ fn send_panel(app: &mut App, ui: &mut Ui) -> Option<Action> {
         if brother && ui.add_enabled(!app.sending, egui::Button::new("💾 Save .fcm…")).on_hover_text("Save the job as a Brother ScanNCut file for CanvasWorkspace or a USB stick").clicked() {
             let (page, plan) = (app.doc.page().clone(), app.plan.clone());
             app.save_fcm(&page, &plan, "design.fcm");
+        }
+        if grbl && app.sending {
+            if let Some(link) = app.ps.x.grbl.as_ref() {
+                if ui.button("⏸ Pause").on_hover_text("Slows to a stop part-way along the line. The tool stays where it is.").clicked() {
+                    link.realtime(cutcraft_core::grbl::FEED_HOLD);
+                }
+                if ui.button("▶ Resume").on_hover_text("Carries on from where it paused").clicked() {
+                    link.realtime(cutcraft_core::grbl::RESUME);
+                }
+            }
         }
         let cancel = ui.add_enabled(app.sending, egui::Button::new("Cancel"));
         let cancel = if maker3 { cancel.on_hover_text("Stops every motor at once and clears the queue. Home the machine afterwards. To carry on later, use Pause instead.") } else { cancel };
@@ -2814,11 +2911,10 @@ enum Payload {
 /// The tools to offer for a group: the Maker 3's own set on that machine
 /// (the pen, the fine-point blade and holder B's drive-housing tools), and
 /// everything but those elsewhere.
-pub fn tool_offered(maker3: bool, t: CutTool) -> bool {
-    if maker3 {
-        matches!(t, CutTool::AutoBlade | CutTool::RatchetBlade | CutTool::DeepCutBlade | CutTool::SketchPen) || cutcraft_core::grbl::DriveTool::from_tool(t).is_some()
-    } else {
-        !t.maker3_only()
+pub fn tool_offered(cricut: Option<cutcraft_core::grbl::CricutModel>, t: CutTool) -> bool {
+    match cricut {
+        Some(m) => matches!(t, CutTool::AutoBlade | CutTool::RatchetBlade | CutTool::DeepCutBlade | CutTool::SketchPen) || (m.drive_tools() && cutcraft_core::grbl::DriveTool::from_tool(t).is_some()),
+        None => !t.maker3_only(),
     }
 }
 
@@ -2836,7 +2932,7 @@ pub fn is_brother(app: &App) -> bool {
 /// The wire language to send in: the chosen one, except that Brother's file
 /// format only goes with a Brother machine (an old saved choice falls back
 /// to the machine's own language).
-fn protocol(app: &App) -> gpgl::Protocol {
+pub fn protocol(app: &App) -> gpgl::Protocol {
     if cutcraft_core::grbl::is_maker3(&app.doc.machine) {
         return gpgl::Protocol::Grbl;
     }

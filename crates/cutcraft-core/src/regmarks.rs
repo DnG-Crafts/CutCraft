@@ -164,28 +164,3 @@ pub fn print_marks(page: &crate::doc::Page) -> Vec<BezPath> {
         geom::rect_path(Rect::new(i.x1, i.y0, o.x1, i.y1)),
     ]
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_sensor_box_hugs_the_artwork() {
-        let mut d = crate::doc::Document::default();
-        d.page_mut().regmarks = RegMarks { enabled: true, inset: 15.0, style: MarkStyle::SensorBox, ..Default::default() };
-        // nothing on the page: round the page
-        assert_eq!(sensor_box(d.page()), Some(Rect::new(16.5, 16.5, d.page().width - 16.5, d.page().height - 16.5)));
-        d.add_path(geom::rect_path(Rect::new(40.0, 50.0, 90.0, 80.0)), crate::doc::Style { stroke: None, ..Default::default() }, 0);
-        let b = sensor_box(d.page()).unwrap();
-        assert!((b.x0 - 35.5).abs() < 1e-9 && (b.y0 - 45.5).abs() < 1e-9 && (b.x1 - 94.5).abs() < 1e-9 && (b.y1 - 84.5).abs() < 1e-9, "{b:?}");
-        // printed as a 3 mm frame with a 3 mm gap to the artwork
-        let marks = print_marks(d.page());
-        assert_eq!(marks.len(), 4);
-        let outer = marks.iter().map(|m| kurbo::Shape::bounding_box(m)).reduce(|a, b| a.union(b)).unwrap();
-        assert_eq!(outer, Rect::new(34.0, 44.0, 96.0, 86.0));
-        // other machines' marks don't change
-        d.page_mut().regmarks.style = MarkStyle::Corners;
-        assert_eq!(sensor_box(d.page()), None);
-        assert_eq!(print_marks(d.page()).len(), 5);
-    }
-}

@@ -185,3 +185,18 @@ pub fn placement_visible(w: &cutcraft_core::prefs::WindowPlacement) -> bool {
         true
     }
 }
+
+/// Whether this is the first CutCraft running: it holds a lock on a file in
+/// the settings folder for as long as it runs, and later ones can't get it.
+/// Decided on the first call (made at start-up) and kept.
+pub fn first_instance() -> bool {
+    static FIRST: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
+    FIRST
+        .get_or_init(|| {
+            let dir = cutcraft_core::prefs::config_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("instance.lock")).ok()?;
+            f.try_lock().ok().map(|_| f)
+        })
+        .is_some()
+}

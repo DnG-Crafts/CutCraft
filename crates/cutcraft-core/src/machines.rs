@@ -295,6 +295,10 @@ pub const MACHINES: &[Machine] = &[
     Machine { id: crate::grbl::MAKER3_ID, name: "Cricut Maker 3 (cutcutgo firmware)", protocol: Grbl, max_width: 12.0 * IN, max_length: 24.0 * IN, tool_slots: 2,
         mats: &[MatKind::Mat12x12, MatKind::Mat12x24], default_mat: MatKind::Mat12x12,
         bluetooth: false, regmarks: false, usb_ids: &[], max_force: 33 },
+    // --- Cricut Explore 3 on cutcutgo: the same protocol, pen and fine-point blade only.
+    Machine { id: crate::grbl::EXPLORE3_ID, name: "Cricut Explore 3 (cutcutgo firmware)", protocol: Grbl, max_width: 12.0 * IN, max_length: 24.0 * IN, tool_slots: 2,
+        mats: &[MatKind::Mat12x12, MatKind::Mat12x24], default_mat: MatKind::Mat12x12,
+        bluetooth: false, regmarks: false, usb_ids: &[], max_force: 33 },
     // --- GRBL (G-code over a serial port): hobby CNC drag knives, pen plotters, diode lasers.
     // The work area is nominal: set the real size in Page setup. Force is the laser power in %.
     Machine { id: "grbl", name: "GRBL machine (CNC / plotter / laser)", protocol: Grbl, max_width: 300.0, max_length: 300.0, tool_slots: 1,

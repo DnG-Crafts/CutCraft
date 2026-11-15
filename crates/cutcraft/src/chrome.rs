@@ -220,6 +220,7 @@ pub const CATEGORIES: &[(&str, Icon, &[Panel])] = &[
     ("Style", Icon::Style, &[Panel::Style, Panel::Colours, Panel::Effects, Panel::Art, Panel::Icons, Panel::Dieline]),
     ("Text", Icon::Text, &[Panel::Text, Panel::Fonts, Panel::WebFonts, Panel::Barcode, Panel::MailMerge]),
     ("Image", Icon::Image, &[Panel::Image, Panel::Trace, Panel::PixScan]),
+    ("Machine", Icon::Machine, &[Panel::Machine]),
     ("Make", Icon::Make, &[Panel::Send, Panel::PrintCut, Panel::Queue]),
     ("More", Icon::More, &[Panel::Script, Panel::Prefs]),
 ];
@@ -292,6 +293,7 @@ pub fn panel_icon(p: Panel) -> Icon {
         Panel::Trace => Icon::Trace,
         Panel::PixScan => Icon::Camera,
         Panel::Send => Icon::Make,
+        Panel::Machine => Icon::Machine,
         Panel::PrintCut => Icon::PrintCut,
         Panel::Script => Icon::Script,
         Panel::Prefs => Icon::Settings,

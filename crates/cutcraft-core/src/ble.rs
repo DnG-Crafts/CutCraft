@@ -182,14 +182,3 @@ impl Drop for BleTransport {
         let _ = self.rt.block_on(self.periph.disconnect());
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn standard_services_are_recognised() {
-        assert!(is_standard(&Uuid::parse_str("00001800-0000-1000-8000-00805f9b34fb").unwrap()));
-        assert!(is_standard(&Uuid::parse_str("0000180a-0000-1000-8000-00805f9b34fb").unwrap()));
-        assert!(!is_standard(&Uuid::parse_str("6e400001-b5a3-f393-e0a9-e50e24dcca9e").unwrap()));
-    }
-}

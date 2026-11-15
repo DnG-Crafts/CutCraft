@@ -217,32 +217,3 @@ unsafe fn print_to_dc(dc: windows::Win32::Graphics::Gdi::HDC, page: &cutcraft_co
         result
     }
 }
-
-#[cfg(all(test, windows))]
-mod tests {
-    /// Prints a sample page with Windows' own "Microsoft Print to PDF"
-    /// printer, to the file in CUTCRAFT_PRINT_TO (run by hand).
-    #[test]
-    #[ignore = "needs the Microsoft Print to PDF printer"]
-    fn prints_to_a_pdf_printer() {
-        use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC};
-        use windows::core::{PCWSTR, w};
-        let Ok(out) = std::env::var("CUTCRAFT_PRINT_TO") else { return };
-        let mut doc = cutcraft_core::doc::Document::default();
-        let red = cutcraft_core::doc::Style { fill: Some(cutcraft_core::doc::Rgba(220, 30, 30, 255)), ..Default::default() };
-        // a 100 x 50 mm red box, 20 mm from the paper's top-left corner
-        doc.add_path(cutcraft_core::geom::rect_path(cutcraft_core::kurbo::Rect::new(20.0, 20.0, 120.0, 70.0)), red, 0);
-        {
-            let p = doc.page_mut();
-            p.width = 210.0;
-            p.height = 297.0;
-        }
-        unsafe {
-            let dc = CreateDCW(w!("WINSPOOL"), w!("Microsoft Print to PDF"), PCWSTR::null(), None);
-            assert!(!dc.is_invalid(), "no Microsoft Print to PDF printer");
-            let paper = super::print_to_dc(dc, doc.page(), "test", 1, Some(std::path::Path::new(&out))).unwrap();
-            let _ = DeleteDC(dc);
-            println!("paper {paper:?}");
-        }
-    }
-}

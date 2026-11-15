@@ -24,7 +24,11 @@ pub fn section(app: &mut App, ui: &mut Ui) {
     if !app.sending && app.ps.x.grbl.as_ref().is_some_and(|l| l.dialect != dialect) {
         app.ps.x.grbl = None;
     }
-    ui.heading(if maker3 { "Cricut Maker 3 connection" } else { "GRBL connection" });
+    let model = grbl::cricut_model(&app.doc.machine);
+    ui.heading(match model {
+        Some(m) => format!("{} connection", m.label()),
+        None => "GRBL connection".into(),
+    });
     if app.ps.x.grbl_scanned != Some(dialect) {
         app.ps.x.grbl_scanned = Some(dialect);
         scan(app, maker3);
@@ -63,17 +67,22 @@ pub fn section(app: &mut App, ui: &mut Ui) {
         if !connected {
             let can = !app.prefs.grbl.port.trim().is_empty();
             if ui.add_enabled(can, egui::Button::new(RichText::new("Connect").strong())).clicked() {
-                let baud = if maker3 { 115200 } else { app.prefs.grbl.baud };
-                let link = GrblLink::connect(app.prefs.grbl.port.trim(), baud, dialect);
-                // the tool last used is most likely still the one in use
-                link.prefer_tool(app.prefs.maker3.active_holder);
-                app.ps.x.grbl = Some(link);
-                let _ = app.prefs.save();
+                open_link(app);
             }
         } else if ui.add_enabled(!app.sending, egui::Button::new("Disconnect")).clicked() {
             app.ps.x.grbl = None;
+            // don't connect straight back
+            app.ps.x.grbl_auto_off = true;
         }
     });
+    let hint = if crate::startup::first_instance() {
+        "Connect with these settings by itself: 2 s after CutCraft opens, and whenever the machine is switched on later. Not after you click Disconnect, until you connect again."
+    } else {
+        "Connect with these settings by itself, 2 s after CutCraft opens. Another CutCraft is already running, so this one leaves the machine to it."
+    };
+    if ui.checkbox(&mut app.prefs.grbl.auto_connect, "Connect automatically").on_hover_text(hint).changed() {
+        let _ = app.prefs.save();
+    }
 
     match app.ps.x.grbl.take() {
         Some(link) => {
@@ -82,7 +91,11 @@ pub fn section(app: &mut App, ui: &mut Ui) {
         }
         None => {
             ui.small(if maker3 {
-                "Hold the machine's Power button for 3 s and let it home, then ⟳ and Connect. The port only exists once the machine is on."
+                if model == Some(grbl::CricutModel::Explore3) {
+                    "Hold the machine's Power button (1 s with the newer bootloader, 3 s with the older), then ⟳ and Connect. The port only exists once the machine is on. CutCraft homes it when it connects: it doesn't home itself."
+                } else {
+                    "Hold the machine's Power button for 3 s and let it home, then ⟳ and Connect. The port only exists once the machine is on."
+                }
             } else {
                 "Connect the machine by USB, pick its port and Connect. Most GRBL boards use 115200."
             });
@@ -95,12 +108,90 @@ pub fn section(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// Auto-connect, called every frame: once the window has been up 2 s, and
+/// then every 3 s while there's no connection, look for the machine's port
+/// and connect when it appears. Only the first CutCraft running does this,
+/// and never during a job or after the user disconnected.
+pub fn auto_connect(app: &mut App, ctx: &egui::Context) {
+    let grbl_machine = !crate::panels::is_brother(app) && crate::panels::protocol(app) == cutcraft_core::gpgl::Protocol::Grbl;
+    if !app.prefs.grbl.auto_connect || !grbl_machine || app.sending || app.ps.x.grbl_auto_off || !crate::startup::first_instance() {
+        return;
+    }
+    if app.ps.x.grbl.as_ref().is_some_and(|l| !l.state().closed) {
+        app.ps.x.grbl_auto_seen = true;
+        return;
+    }
+    let now = ctx.input(|i| i.time);
+    if app.ps.x.grbl_auto_next == 0.0 {
+        app.ps.x.grbl_auto_next = now + 2.0;
+    }
+    if now < app.ps.x.grbl_auto_next {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(app.ps.x.grbl_auto_next - now));
+        return;
+    }
+    app.ps.x.grbl_auto_next = now + 3.0;
+    ctx.request_repaint_after(std::time::Duration::from_secs(3));
+    let maker3 = grbl::is_maker3(&app.doc.machine);
+    let ports = grbl::list_ports();
+    let found = if maker3 {
+        ports.iter().find(|p| p.usb == Some(grbl::MAKER3_USB)).map(|p| p.name.clone())
+    } else {
+        let want = app.prefs.grbl.port.trim();
+        ports.iter().find(|p| !want.is_empty() && p.name == want).map(|p| p.name.clone())
+    };
+    // connect when the port appears; a failed try waits for it to come back
+    let appeared = found.is_some() && !app.ps.x.grbl_auto_seen;
+    app.ps.x.grbl_auto_seen = found.is_some();
+    if let (true, Some(port)) = (appeared, found) {
+        app.ps.x.grbl_ports = ports;
+        app.ps.x.grbl_scanned = Some(if maker3 { Dialect::Maker3 } else { Dialect::Stock });
+        app.prefs.grbl.port = port.clone();
+        app.status = format!("Connecting to the machine on {port}…");
+        open_link(app);
+    }
+}
+
+/// Open the serial link with the port and speed in the settings.
+fn open_link(app: &mut App) {
+    app.ps.x.grbl_auto_off = false;
+    let maker3 = grbl::is_maker3(&app.doc.machine);
+    let dialect = if maker3 { Dialect::Maker3 } else { Dialect::Stock };
+    let baud = if maker3 { 115200 } else { app.prefs.grbl.baud };
+    let link = GrblLink::connect(app.prefs.grbl.port.trim(), baud, dialect);
+    // the tool last used is most likely still the one in use
+    link.prefer_tool(app.prefs.cricut_mut(&app.doc.machine).active_holder);
+    // the Explore 3 doesn't home at power-on, and ignores Z until it has
+    if grbl::cricut_model(&app.doc.machine).is_some_and(|m| !m.homes_at_power_on()) {
+        link.home_first();
+    }
+    app.ps.x.grbl = Some(link);
+    let _ = app.prefs.save();
+}
+
+/// Connect with the last settings, from outside the Machine tab: a Cricut's
+/// port is looked for again (its COM number can change), any other machine
+/// uses the port it was last connected on.
+pub fn quick_connect(app: &mut App) {
+    if app.sending {
+        return;
+    }
+    let maker3 = grbl::is_maker3(&app.doc.machine);
+    scan(app, maker3);
+    app.ps.x.grbl_scanned = Some(if maker3 { Dialect::Maker3 } else { Dialect::Stock });
+    if app.prefs.grbl.port.trim().is_empty() {
+        app.status = "No serial port found: switch the machine on, then try again (or pick the port in the Machine tab)".into();
+        return;
+    }
+    app.status = format!("Connecting on {}…", app.prefs.grbl.port.trim());
+    open_link(app);
+}
+
 /// Look for serial ports and pick the likely one.
 fn scan(app: &mut App, maker3: bool) {
     app.ps.x.grbl_ports = grbl::list_ports();
     if maker3 {
         if let Some(p) = app.ps.x.grbl_ports.iter_mut().find(|p| p.usb == Some(grbl::MAKER3_USB)) {
-            p.description = "Cricut Maker 3".into();
+            p.description = "Cricut (cutcutgo)".into();
             app.prefs.grbl.port = p.name.clone();
             return;
         }
@@ -397,8 +488,8 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
     if st.detected != app.ps.x.grbl_detected_seen {
         match st.detected.as_deref() {
             Some(n) => match grbl::DriveTool::from_reported(n) {
-                Some(d) => app.prefs.maker3.holder_b = Some(d),
-                None if n == "not found" => app.prefs.maker3.holder_b = None,
+                Some(d) => app.prefs.cricut_mut(&app.doc.machine).holder_b = Some(d),
+                None if n == "not found" => app.prefs.cricut_mut(&app.doc.machine).holder_b = None,
                 None => {}
             },
             None => {}
@@ -407,15 +498,15 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
     }
     // remember the holder in use (not mid-job: jobs park with the pen's numbers)
     if let Some(t) = st.tool.filter(|_| idle) {
-        if t != app.prefs.maker3.active_holder {
-            app.prefs.maker3.active_holder = t;
+        if t != app.prefs.cricut_mut(&app.doc.machine).active_holder {
+            app.prefs.cricut_mut(&app.doc.machine).active_holder = t;
             link.prefer_tool(t);
             let _ = app.prefs.save();
         }
     }
-    let holder_b_before = app.prefs.maker3.holder_b;
-    let o = app.prefs.maker3.clone();
-    let bed = grbl::maker3_bed(app.doc.page().mat);
+    let holder_b_before = app.prefs.cricut_mut(&app.doc.machine).holder_b;
+    let o = app.prefs.cricut(&app.doc.machine);
+    let bed = app.prefs.cricut(&app.doc.machine).bed(app.doc.page().mat);
     let now = ui.input(|i| i.time);
     // the reported position lags a jog, and each jog is checked against it
     let settled = idle && now >= app.ps.x.grbl_jog_until;
@@ -428,39 +519,41 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
                 }
             }
         });
-        ui.horizontal(|ui| {
-            ui.label("In holder B");
-            let shown = app.prefs.maker3.holder_b.map(|d| d.label()).unwrap_or("Fine-point blade");
-            egui::ComboBox::from_id_salt("m3_btool")
-                .selected_text(shown)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut app.prefs.maker3.holder_b, None, "Fine-point blade");
-                    for d in grbl::DriveTool::ALL {
-                        ui.selectable_value(&mut app.prefs.maker3.holder_b, Some(d), d.label());
-                    }
-                })
-                .response
-                .on_hover_text("Which tool is in holder B, for finding and saving its height. Detect tool fills this in for the drive-housing tools.");
-            // only while the choice is what the last scan found
-            let scanned = match st.detected.as_deref() {
-                Some("not found") => Some(None),
-                Some(n) => grbl::DriveTool::from_reported(n).map(Some),
-                None => None,
-            };
-            if scanned == Some(app.prefs.maker3.holder_b) {
-                let (tag, tip) = if app.prefs.maker3.holder_b.is_some() {
-                    ("✓ detected", "The last Detect tool found this tool in holder B")
-                } else {
-                    ("no drive-housing tool found", "The last Detect tool found no drive-housing tool: holder B is empty, or has the fine-point blade (which can't be scanned)")
+        if o.model.drive_tools() {
+            ui.horizontal(|ui| {
+                ui.label("In holder B");
+                let shown = app.prefs.cricut_mut(&app.doc.machine).holder_b.map(|d| d.label()).unwrap_or("Fine-point blade");
+                egui::ComboBox::from_id_salt("m3_btool")
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut app.prefs.cricut_mut(&app.doc.machine).holder_b, None, "Fine-point blade");
+                        for d in grbl::DriveTool::ALL {
+                            ui.selectable_value(&mut app.prefs.cricut_mut(&app.doc.machine).holder_b, Some(d), d.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text("Which tool is in holder B, for finding and saving its height. Detect tool fills this in for the drive-housing tools.");
+                // only while the choice is what the last scan found
+                let scanned = match st.detected.as_deref() {
+                    Some("not found") => Some(None),
+                    Some(n) => grbl::DriveTool::from_reported(n).map(Some),
+                    None => None,
                 };
-                ui.label(RichText::new(tag).color(Color32::from_rgb(90, 180, 90))).on_hover_text(tip);
-            }
-        });
+                if scanned == Some(app.prefs.cricut_mut(&app.doc.machine).holder_b) {
+                    let (tag, tip) = if app.prefs.cricut_mut(&app.doc.machine).holder_b.is_some() {
+                        ("✓ detected", "The last Detect tool found this tool in holder B")
+                    } else {
+                        ("no drive-housing tool found", "The last Detect tool found no drive-housing tool: holder B is empty, or has the fine-point blade (which can't be scanned)")
+                    };
+                    ui.label(RichText::new(tag).color(Color32::from_rgb(90, 180, 90))).on_hover_text(tip);
+                }
+            });
+        }
         ui.horizontal_wrapped(|ui| {
             if ui.button("Load tool").on_hover_text("Lifts both holders, turns steering off and moves the carriage to the middle, so you can reach holder B").clicked() {
-                start_routine(app, link, &grbl::MAKER3_LOAD_TOOL, false);
+                start_routine(app, link, o.model.load_tool(), false);
             }
-            if ui.button("Detect tool").on_hover_text("Homes, then scans the tool in holder B and says which it is (30-40 s). For the drive-housing tools (with a gear on top): the fine-point blade can't be scanned.").clicked() {
+            if o.model.drive_tools() && ui.button("Detect tool").on_hover_text("Homes, then scans the tool in holder B and says which it is (30-40 s). For the drive-housing tools (with a gear on top): the fine-point blade can't be scanned.").clicked() {
                 start_routine(app, link, &grbl::MAKER3_DETECT_TOOL, true);
             }
         });
@@ -506,7 +599,7 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
             ui.end_row();
         });
         if let Some(d) = jog {
-            match grbl::maker3_jog(bed, st.tool, st.mpos, d) {
+            match grbl::maker3_jog(o.model, bed, st.tool, st.mpos, d) {
                 Ok(lines) => {
                     send_all(lines);
                     app.ps.x.grbl_jog_until = now + 0.6;
@@ -520,9 +613,12 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
             }
             if ui.button("Make this the mat centre").on_hover_text("If Go to mat centre doesn't land on the middle of the mat, jog the tool's tip there and click: plain cuts shift to match").clicked() {
                 let centre = grbl::Maker3Options { shift_x: 0.0, shift_y: 0.0, ..o.clone() }.to_machine(cutcraft_core::kurbo::Point::new(bed.0 / 2.0, bed.1 / 2.0), bed);
-                (app.prefs.maker3.shift_x, app.prefs.maker3.shift_y) = (st.mpos[0] - centre.x, st.mpos[1] - centre.y);
+                (app.prefs.cricut_mut(&app.doc.machine).shift_x, app.prefs.cricut_mut(&app.doc.machine).shift_y) = (st.mpos[0] - centre.x, st.mpos[1] - centre.y);
                 let _ = app.prefs.save();
-                app.status = format!("Plain cuts now shift X {:+.2} Y {:+.2} mm", app.prefs.maker3.shift_x, app.prefs.maker3.shift_y);
+                app.status = {
+                    let s = app.prefs.cricut(&app.doc.machine);
+                    format!("Plain cuts now shift X {:+.2} Y {:+.2} mm", s.shift_x, s.shift_y)
+                };
             }
             if ui.button("Lift tool").clicked() {
                 send_all(grbl::maker3_tool_up());
@@ -538,7 +634,7 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
             if let Some(rect) = cutcraft_core::regmarks::sensor_box(page) {
                 let scan = page.regmarks.scan;
                 if ui.button("Find the printed sheet").on_hover_text(format!("Scans the printed registration box and shows where the sheet is, without cutting ({})", scan.about())).clicked() {
-                    match grbl::sensor_box_crossings(rect, scan) {
+                    match grbl::sensor_box_crossings(app.prefs.cricut(&app.doc.machine).model, rect, scan) {
                         Ok(crossings) => {
                             app.cancel.store(false, Ordering::Relaxed);
                             *app.progress.lock().unwrap() = Default::default();
@@ -570,7 +666,7 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
                         // only over the mat: near the ends of travel a tool hangs off it
                         match if to < z { grbl::maker3_can_lower(bed, st.mpos) } else { Ok(()) } {
                             Ok(()) => {
-                                send_all(grbl::maker3_height(to, st.tool.unwrap_or(0)));
+                                send_all(grbl::maker3_height(o.model, to, st.tool.unwrap_or(0)));
                                 app.ps.x.grbl_jog_until = now + 0.6;
                             }
                             Err(e) => app.status = e,
@@ -578,10 +674,16 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
                     }
                     ui.monospace(format!("Z {z:.2}"));
                 });
-                let which = if st.tool == Some(0) { grbl::Maker3Tool::Pen } else { app.prefs.maker3.holder_b.map(grbl::Maker3Tool::Drive).unwrap_or(grbl::Maker3Tool::FinePoint) };
+                let which = if st.tool == Some(0) {
+                    grbl::Maker3Tool::Pen
+                } else if o.model.drive_tools() {
+                    app.prefs.cricut_mut(&app.doc.machine).holder_b.map(grbl::Maker3Tool::Drive).unwrap_or(grbl::Maker3Tool::FinePoint)
+                } else {
+                    grbl::Maker3Tool::FinePoint
+                };
                 let name = which.label();
                 if ui.button(format!("Save Z {z:.2} as the {name} height")).clicked() {
-                    *app.prefs.maker3.setting_mut(which).0 = z;
+                    *app.prefs.cricut_mut(&app.doc.machine).setting_mut(which).0 = z;
                     let _ = app.prefs.save();
                     app.status = format!("{name} height set to Z {z:.2}");
                 }
@@ -589,15 +691,15 @@ fn maker3_controls(app: &mut App, ui: &mut Ui, link: &GrblLink, st: &grbl::GrblS
             ui.small("Pen: where it first marks. Blade: just past contact, deeper until one pass cuts through on fresh material (going over an old line flatters it).");
         });
     });
-    if app.prefs.maker3.holder_b != holder_b_before {
+    if app.prefs.cricut_mut(&app.doc.machine).holder_b != holder_b_before {
         let _ = app.prefs.save();
     }
 }
 
 /// The Maker 3's settings: heights, feeds, where the design sits.
 fn maker3_settings(app: &mut App, ui: &mut Ui) {
-    let bed = grbl::maker3_bed(app.doc.page().mat);
-    let o = &mut app.prefs.maker3;
+    let bed = app.prefs.cricut(&app.doc.machine).bed(app.doc.page().mat);
+    let o = app.prefs.cricut_mut(&app.doc.machine);
     let before = o.clone();
     egui::CollapsingHeader::new("Machine settings").show(ui, |ui| {
         egui::Grid::new("m3_set").num_columns(2).show(ui, |ui| {
@@ -605,7 +707,8 @@ fn maker3_settings(app: &mut App, ui: &mut Ui) {
             ui.weak("Height and speed");
             ui.end_row();
             use grbl::Maker3Tool;
-            let tools = [Maker3Tool::Pen, Maker3Tool::FinePoint].into_iter().chain(grbl::DriveTool::ALL.into_iter().map(Maker3Tool::Drive));
+            let drive = if o.model.drive_tools() { &grbl::DriveTool::ALL[..] } else { &[] };
+            let tools = [Maker3Tool::Pen, Maker3Tool::FinePoint].into_iter().chain(drive.iter().copied().map(Maker3Tool::Drive));
             for tool in tools {
                 let label = match tool {
                     Maker3Tool::Pen => "Pen".to_string(),
@@ -616,7 +719,7 @@ fn maker3_settings(app: &mut App, ui: &mut Ui) {
                 };
                 ui.label(label);
                 ui.horizontal(|ui| {
-                    let zmin = grbl::maker3_z_min(tool.holder());
+                    let zmin = o.model.z_min(tool.holder());
                     let (z, f) = o.setting_mut(tool);
                     ui.add(DragValue::new(z).range(zmin..=0.0).speed(0.05).prefix("Z ").suffix(" mm"));
                     ui.add(DragValue::new(f).range(grbl::MAKER3_FEED_MIN..=grbl::MAKER3_FEED_MAX).speed(10.0).suffix(" mm/min"));
@@ -633,7 +736,7 @@ fn maker3_settings(app: &mut App, ui: &mut Ui) {
             };
             shift(ui, "Shift plain cuts", "If plain cuts always land a little off on the mat", &mut o.shift_x, &mut o.shift_y);
             // in page terms: the machine's +X is the page's left
-            ui.label("Move Print & Cut cuts").on_hover_text("A fine adjustment on top of the Maker 3's built-in Print & Cut offset (0 / 0 is that offset). If cuts always land off the print the same way: cutting too high, move them down by that much; too far left, move them right.");
+            ui.label("Move Print & Cut cuts").on_hover_text("A fine adjustment for Print & Cut (on the Maker 3 it's on top of its built-in offset, so 0 / 0 is that offset). If cuts always land off the print the same way: cutting too high, move them down by that much; too far left, move them right.");
             ui.horizontal(|ui| {
                 let mut right = -o.pc_nudge_x;
                 if ui.add(DragValue::new(&mut right).speed(0.05).fixed_decimals(2).prefix("right ").suffix(" mm")).changed() {
@@ -692,8 +795,8 @@ fn refuse(app: &mut App, e: String) {
 /// Check a whole Maker 3 job before any of it runs, and mark which holder
 /// each part uses so it only stops where a tool has to be swapped by hand.
 pub fn maker3_job(app: &mut App, job: cutjob::CutJob) -> Option<cutjob::CutJob> {
-    let bed = grbl::maker3_bed(app.doc.page().mat);
-    match grbl::encode_maker3(&job, bed, &app.prefs.maker3).and_then(|_| grbl::maker3_holders(job)) {
+    let bed = app.prefs.cricut(&app.doc.machine).bed(app.doc.page().mat);
+    match grbl::encode_maker3(&job, bed, &app.prefs.cricut(&app.doc.machine)).and_then(|_| grbl::maker3_holders(job)) {
         Ok(job) => Some(job),
         Err(e) => {
             refuse(app, e);
@@ -706,20 +809,21 @@ pub fn maker3_job(app: &mut App, job: cutjob::CutJob) -> Option<cutjob::CutJob> 
 fn print_cut_maker3(app: &mut App, job: &cutjob::CutJob) {
     let page = app.doc.page();
     let Some(rect) = cutcraft_core::regmarks::sensor_box(page) else {
-        return refuse(app, "The Maker 3 finds a printed box round the artwork: turn on Page ▸ Registration marks (it uses the box style for this machine).".into());
+        return refuse(app, "The machine finds a printed box round the artwork: turn on Page ▸ Registration marks (it uses the box style for this machine).".into());
     };
     let scan = page.regmarks.scan;
-    let crossings = match grbl::sensor_box_crossings(rect, scan) {
+    let crossings = match grbl::sensor_box_crossings(app.prefs.cricut(&app.doc.machine).model, rect, scan) {
         Ok(c) => c,
         Err(e) => return refuse(app, e),
     };
-    let (bed, o, job) = (grbl::maker3_bed(page.mat), app.prefs.maker3.clone(), job.clone());
+    let (bed, o, job) = (app.prefs.cricut(&app.doc.machine).bed(page.mat), app.prefs.cricut(&app.doc.machine), job.clone());
     // the cut must fit where the sheet should be, before minutes of scanning
     let nominal = |p: cutcraft_core::kurbo::Point| cutcraft_core::kurbo::Point::new(grbl::MAKER3_WORK_X - p.x, p.y) + o.pc_offset();
     if let Err(e) = grbl::encode_maker3_mapped(&job, bed, &o, &nominal) {
         return refuse(app, e);
     }
-    let mut ask = String::from("Ready for Print & Cut on the Cricut Maker 3?\n\n- Printed at 100% / actual size, on white matt paper\n- The sheet in the mat's top-left corner, and the mat loaded with the feed button\n");
+    let mut ask = format!("Ready for Print & Cut on the {}?\n\n", o.model.label());
+    ask += "- Printed at 100% / actual size, on white matt paper\n- The sheet in the mat's top-left corner, and the mat loaded with the feed button\n";
     ask += &tool_checklist(&job, &o);
     ask += &format!("- Hands clear of the carriage\n\nCutCraft scans the printed box first ({}: {}), and only cuts if the sheet is found.", scan.label().to_lowercase(), scan.about());
     if !crate::app::confirm(&ask) {
@@ -742,13 +846,13 @@ fn print_cut_maker3(app: &mut App, job: &cutjob::CutJob) {
 
 /// Run a job on the Maker 3: check it, make sure the operator is ready, send.
 fn send_maker3(app: &mut App, job: &cutjob::CutJob) {
-    let bed = grbl::maker3_bed(app.doc.page().mat);
-    let lines = match grbl::encode_maker3(job, bed, &app.prefs.maker3) {
+    let bed = app.prefs.cricut(&app.doc.machine).bed(app.doc.page().mat);
+    let lines = match grbl::encode_maker3(job, bed, &app.prefs.cricut(&app.doc.machine)) {
         Ok(l) => l,
         Err(e) => return refuse(app, e),
     };
     let mut ask = String::from("Ready to run on the Cricut Maker 3?\n\n- Mat loaded with the machine's feed button\n");
-    ask += &tool_checklist(job, &app.prefs.maker3);
+    ask += &tool_checklist(job, &app.prefs.cricut(&app.doc.machine));
     ask += "- Hands clear of the carriage";
     if !crate::app::confirm(&ask) {
         return;
@@ -767,7 +871,7 @@ pub fn send(app: &mut App, job: &cutjob::CutJob, print_cut: bool) {
     let maker3 = grbl::is_maker3(&app.doc.machine);
     let wanted = if maker3 { Dialect::Maker3 } else { Dialect::Stock };
     let Some(link) = ready(app).filter(|l| l.dialect == wanted) else {
-        app.status = format!("Connect to the machine first (Send panel ▸ {} connection)", if maker3 { "Cricut Maker 3" } else { "GRBL" });
+        app.status = "Connect to the machine first, in the Machine tab".into();
         return;
     };
     if maker3 {

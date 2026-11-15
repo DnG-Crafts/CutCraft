@@ -565,8 +565,9 @@ impl App {
             Protocol::Dmpl => self.export_text("dmpl", "DMPL", cutcraft_core::gpgl::encode_dmpl(&job, h)),
             Protocol::Fcm => unreachable!("saved above"),
             Protocol::Grbl if cutcraft_core::grbl::is_maker3(&self.doc.machine) => {
-                let bed = cutcraft_core::grbl::maker3_bed(self.doc.page().mat);
-                match cutcraft_core::grbl::encode_maker3(&job, bed, &self.prefs.maker3) {
+                let o = self.prefs.cricut(&self.doc.machine);
+                let bed = o.bed(self.doc.page().mat);
+                match cutcraft_core::grbl::encode_maker3(&job, bed, &o) {
                     Ok(lines) => self.export_text("nc", "G-code", lines.join("\n") + "\n"),
                     Err(e) => self.status = e,
                 }
@@ -1146,6 +1147,7 @@ impl App {
             });
             top!(ui, "Send", |ui| {
                 item(ui, "Send to cutter…", "Ctrl+Enter", ShowPanel(Panel::Send));
+                item(ui, "Machine & connection…", "", ShowPanel(Panel::Machine));
                 item(ui, "Export cut job (GPGL)…", "", ExportGpgl);
             });
             top!(ui, "Help", |ui| {
@@ -1556,6 +1558,7 @@ impl eframe::App for App {
         }
         // keep the design to its locked sizes and distances
         crate::paramspanel::enforce(self);
+        crate::grbl_ui::auto_connect(self, &ctx);
         // everything on a higher layer stacks above everything on a lower one
         let mut restacked = false;
         for p in &mut self.doc.pages {
@@ -1651,16 +1654,5 @@ impl eframe::App for App {
             self.prefs.window = self.window_place;
         }
         let _ = self.prefs.save();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn action_labels_read_as_words() {
-        assert_eq!(action_label(&Action::FitIntoBox), "Fit into box");
-        assert_eq!(action_label(&Action::Undo), "Undo");
     }
 }

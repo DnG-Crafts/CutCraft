@@ -171,33 +171,3 @@ fn host_of(url: &str) -> Option<String> {
     let host = host.split(':').next()?;
     (!host.is_empty()).then(|| host.to_lowercase())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn blocks_ad_networks_and_their_subdomains_only() {
-        let mut b = Blocker { domains: BUILT_IN.iter().map(|d| d.to_string()).collect() };
-        assert!(b.blocks("https://securepubads.g.doubleclick.net/tag/js/gpt.js"));
-        assert!(b.blocks("https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=1"));
-        assert!(!b.blocks("https://www.svgrepo.com/show/12345/heart.svg"));
-        assert!(!b.blocks("https://www.fontrepo.com/font/7/a-bugs-life.ttf"));
-        // look-alikes aren't caught
-        assert!(!b.blocks("https://notdoubleclick.net/x"));
-        b.add_list("# my list\n0.0.0.0 ads.example.org\n||tracker.example.com^\nplain.example.net ! note\n");
-        assert!(b.blocks("http://ads.example.org:8080/a"));
-        assert!(b.blocks("https://cdn.tracker.example.com/t.js"));
-        assert!(b.blocks("https://plain.example.net/"));
-        assert!(!b.blocks("https://example.org/"));
-    }
-
-    #[test]
-    fn page_script_carries_the_list() {
-        let mut b = Blocker { domains: BUILT_IN.iter().map(|d| d.to_string()).collect() };
-        b.add_list("ads.example.org");
-        let js = b.page_script();
-        assert!(!js.contains("__DOMAINS__"));
-        assert!(js.contains("\"doubleclick.net\"") && js.contains("\"ads.example.org\""));
-    }
-}

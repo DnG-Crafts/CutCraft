@@ -71,6 +71,10 @@ fn main() {
     // decide before the log is overwritten: did the GPU renderer kill the last start?
     let prefer_opengl = startup::prefer_opengl();
     startup::begin();
+    // claim "first CutCraft" now, before any other copy can
+    if !startup::first_instance() {
+        startup::note("another CutCraft is already running: this one won't auto-connect");
+    }
     if prefer_opengl {
         startup::note("using OpenGL: the GPU renderer crashed while starting on this PC before");
     }

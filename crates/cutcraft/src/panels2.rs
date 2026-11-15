@@ -113,6 +113,12 @@ pub struct Extra {
     pub grbl: Option<cutcraft_core::grbl::GrblLink>,
     pub grbl_ports: Vec<cutcraft_core::grbl::Port>,
     pub grbl_scanned: Option<cutcraft_core::grbl::Dialect>,
+    /// Auto-connect: when to look for the port next (0: not started), whether
+    /// it was there last time, and whether the user disconnected (then it
+    /// leaves the machine alone until they connect again).
+    pub grbl_auto_next: f64,
+    pub grbl_auto_seen: bool,
+    pub grbl_auto_off: bool,
     /// When the last Maker 3 jog can be assumed to show in the reported position.
     pub grbl_jog_until: f64,
     /// Maker 3: the last scan result already applied to holder B's tool.
@@ -232,6 +238,9 @@ impl Default for Extra {
             grbl: None,
             grbl_ports: vec![],
             grbl_scanned: None,
+            grbl_auto_next: 0.0,
+            grbl_auto_seen: false,
+            grbl_auto_off: false,
             grbl_jog_until: 0.0,
             grbl_detected_seen: None,
             grbl_step: 10.0,

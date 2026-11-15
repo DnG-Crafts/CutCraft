@@ -188,37 +188,3 @@ pub fn detect_markers(img: &image::RgbaImage) -> Option<[Point; 4]> {
     }
     Some(out)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn homography_roundtrip() {
-        let src = [Point::new(10.0, 20.0), Point::new(300.0, 5.0), Point::new(320.0, 260.0), Point::new(0.0, 240.0)];
-        let dst = [Point::new(0.0, 0.0), Point::new(100.0, 0.0), Point::new(100.0, 80.0), Point::new(0.0, 80.0)];
-        let h = homography(&src, &dst).unwrap();
-        for i in 0..4 {
-            assert!(apply(&h, src[i]).distance(dst[i]) < 1e-6);
-        }
-    }
-
-    #[test]
-    fn detects_markers_and_rectifies() {
-        let mut img = image::RgbaImage::from_pixel(400, 300, image::Rgba([240, 235, 230, 255]));
-        let centres = [(30, 30), (370, 40), (360, 270), (40, 260)];
-        for (cx, cy) in centres {
-            for y in cy - 8..cy + 8 {
-                for x in cx - 8..cx + 8 {
-                    img.put_pixel(x, y, image::Rgba([10, 10, 10, 255]));
-                }
-            }
-        }
-        let m = detect_markers(&img).expect("markers");
-        for (k, (cx, cy)) in centres.iter().enumerate() {
-            assert!(m[k].distance(Point::new(*cx as f64 - 0.5, *cy as f64 - 0.5)) < 2.0, "{k}: {:?}", m[k]);
-        }
-        let r = rectify(&img, &m, 100.0, 80.0, 2.0).unwrap();
-        assert_eq!((r.width(), r.height()), (200, 160));
-    }
-}

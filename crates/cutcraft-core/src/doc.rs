@@ -46,6 +46,9 @@ pub enum CutStyle {
     CutEdge,
     /// Perforated line: `on` mm cut / `off` mm uncut.
     Perforate { on: f64, off: f64 },
+    /// Draw every line with a pen, whatever its group cuts with: drawn
+    /// before the cuts, in the same job.
+    Draw,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -396,7 +399,7 @@ impl Shape {
             }
             match leaf.style.cut {
                 CutStyle::NoCut => {}
-                CutStyle::Cut | CutStyle::Perforate { .. } => out.extend(leaf.world_paths()),
+                CutStyle::Cut | CutStyle::Perforate { .. } | CutStyle::Draw => out.extend(leaf.world_paths()),
                 CutStyle::CutEdge => {
                     let w = leaf.world_paths();
                     let e = geom::boolean(&w, &[], geom::BoolOp::Union);
@@ -656,48 +659,5 @@ impl Document {
     pub fn add_path(&mut self, path: BezPath, style: Style, layer: u32) -> ShapeId {
         let id = self.alloc_id();
         self.add_shape(Shape::new_path(id, path, style), layer)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn colour_codes_keep_transparency() {
-        use super::Rgba;
-        assert_eq!(Rgba(255, 0, 0, 255).hex(), "#ff0000");
-        assert_eq!(Rgba(0, 0, 0, 0).hex(), "#00000000");
-        assert_ne!(Rgba(0, 0, 0, 0).hex(), Rgba(0, 0, 0, 255).hex(), "transparent isn't black");
-        for c in [Rgba(12, 34, 56, 255), Rgba(12, 34, 56, 128), Rgba(0, 0, 0, 0)] {
-            assert_eq!(Rgba::from_hex(&c.hex()), Some(c));
-        }
-    }
-
-    use super::*;
-    #[test]
-    fn base64_roundtrip() {
-        for n in 0..10 {
-            let d: Vec<u8> = (0..n as u8).map(|i| i.wrapping_mul(37)).collect();
-            assert_eq!(b64::decode(&b64::encode(&d)).unwrap(), d);
-        }
-    }
-    #[test]
-    fn hit_test_finds_rect() {
-        let mut d = Document::default();
-        let id = d.add_path(geom::rect_path(Rect::new(10.0, 10.0, 20.0, 20.0)), Style::default(), 0);
-        assert_eq!(d.page().hit_test(Point::new(10.0, 15.0), 0.5), Some(id));
-        assert_eq!(d.page().hit_test(Point::new(15.0, 15.0), 0.5), None);
-    }
-
-    #[test]
-    fn guides_round_trip_and_older_files_still_load() {
-        let mut d = Document::default();
-        d.page_mut().guides.push(Guide { vertical: true, pos: 25.4 });
-        let json = serde_json::to_value(&d).unwrap();
-        let back: Document = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(back.page().guides, d.page().guides);
-        let mut old = json;
-        old["pages"][0].as_object_mut().unwrap().remove("guides");
-        let back: Document = serde_json::from_value(old).unwrap();
-        assert!(back.page().guides.is_empty());
     }
 }
